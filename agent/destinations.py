@@ -80,10 +80,25 @@ def get_destination(store: LocalStore, destination_id: str) -> Destination | Non
     return None
 
 
-def upsert_destination(store: LocalStore, *, label: str, base_url: str, destination_id: str | None = None, company_guid: str = "", company_name: str = "") -> Destination:
+def upsert_destination(
+    store: LocalStore,
+    *,
+    label: str,
+    base_url: str,
+    destination_id: str | None = None,
+    company_guid: str = "",
+    company_name: str = "",
+) -> Destination:
     url = normalize_base_url(base_url)
     destinations = list_destinations(store)
     for existing in destinations:
+        if destination_id and existing.id == destination_id:
+            existing.label = label or existing.label
+            existing.base_url = url
+            existing.company_guid = company_guid
+            existing.company_name = company_name or existing.company_name
+            save_destinations(store, destinations)
+            return existing
         if existing.base_url.lower() == url.lower() and existing.company_guid == company_guid:
             existing.label = label or existing.label
             existing.base_url = url
@@ -91,8 +106,13 @@ def upsert_destination(store: LocalStore, *, label: str, base_url: str, destinat
             save_destinations(store, destinations)
             return existing
     key = hashlib.sha256(f"{url.lower()}:{company_guid}".encode()).hexdigest()[:16]
-    item = Destination(id=f"{slug_from_url(url)}-{key}" if company_guid else destination_id or slug_from_url(url),
-                       label=label or slug_from_url(url), base_url=url, company_guid=company_guid, company_name=company_name)
+    item = Destination(
+        id=(destination_id or (f"{slug_from_url(url)}-{key}" if company_guid else slug_from_url(url))),
+        label=label or slug_from_url(url),
+        base_url=url,
+        company_guid=company_guid,
+        company_name=company_name,
+    )
     destinations.append(item)
     save_destinations(store, destinations)
     return item
@@ -127,11 +147,18 @@ def migrate_legacy_destination(store: LocalStore, data_dir: Path, legacy_url: st
         store.set_meta(f"import_done_{destination.id}", True)
 
 
-def import_done(store: LocalStore, destination_id: str) -> bool:
+def import_done(store: LocalStore, destination_id: str, company_guid: str = "") -> bool:
+    if company_guid:
+        return bool(store.get_meta(f"import_done_{destination_id}_{company_guid}"))
     return bool(store.get_meta(f"import_done_{destination_id}"))
 
 
-def set_import_done(store: LocalStore, destination_id: str, done: bool = True) -> None:
+def set_import_done(store: LocalStore, destination_id: str, done: bool = True, company_guid: str = "") -> None:
+    if company_guid:
+        store.set_meta(f"import_done_{destination_id}_{company_guid}", done)
+        if not done:
+            store.set_meta(f"import_done_{destination_id}", False)
+        return
     store.set_meta(f"import_done_{destination_id}", done)
 
 
@@ -140,24 +167,33 @@ def is_pluschwood(destination: Destination) -> bool:
     return "pluschwood" in host or destination.id.startswith("pluschwood") or "pluschwood" in destination.label.lower()
 
 
-def cursor_key(destination_id: str, collection: str) -> str:
+def cursor_key(destination_id: str, collection: str, company_guid: str = "") -> str:
+    if company_guid:
+        return f"import_cursor_{destination_id}_{company_guid}_{collection.lower()}"
     return f"import_cursor_{destination_id}_{collection.lower()}"
 
 
-def get_cursor(store: LocalStore, destination_id: str, collection: str) -> int:
-    return int(store.get_meta(cursor_key(destination_id, collection), 0) or 0)
+def get_cursor(store: LocalStore, destination_id: str, collection: str, company_guid: str = "") -> int:
+    scoped = int(store.get_meta(cursor_key(destination_id, collection, company_guid), 0) or 0)
+    if company_guid and scoped == 0:
+        # Fall back to legacy destination-wide cursor once when migrating.
+        return int(store.get_meta(cursor_key(destination_id, collection), 0) or 0)
+    return scoped
 
 
-def set_cursor(store: LocalStore, destination_id: str, collection: str, value: int) -> None:
-    store.set_meta(cursor_key(destination_id, collection), int(value))
+def set_cursor(store: LocalStore, destination_id: str, collection: str, value: int, company_guid: str = "") -> None:
+    store.set_meta(cursor_key(destination_id, collection, company_guid), int(value))
 
 
-def reset_import(store: LocalStore, destination_id: str) -> None:
+def reset_import(store: LocalStore, destination_id: str, company_guids: list[str] | None = None) -> None:
     """Replay import for one destination without touching other destinations' cursors."""
     set_import_done(store, destination_id, False)
-    for collection in ("group", "ledger", "unit", "godown", "stockgroup", "stockitem", "vouchertype", "voucher"):
+    collections = ("group", "ledger", "unit", "godown", "stockgroup", "stockitem", "vouchertype", "voucher")
+    for collection in collections:
         set_cursor(store, destination_id, collection, 0)
-    # Legacy shared cursors are ignored by the per-destination importer.
+        for guid in company_guids or []:
+            set_cursor(store, destination_id, collection, 0, company_guid=guid)
+            set_import_done(store, destination_id, False, company_guid=guid)
 
 
 def status_summary(store: LocalStore, data_dir: Path) -> str:

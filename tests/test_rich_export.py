@@ -43,7 +43,6 @@ class RichExportTests(unittest.TestCase):
     def test_stock_item_hsn_and_rates(self):
         xml = (FIXTURES / "rich_stock_item.xml").read_text(encoding="utf-8")
         items = tally_xml.parse_objects(xml, "STOCKITEM", rich=True)
-        # GSTDETAILS HSNCODE wins when present; HSNDETAILS covers TallyPrime empties.
         self.assertEqual(items[0]["hsn"], "4819")
         self.assertEqual(items[0]["unit"], "NOS")
         heads = {row["duty_head"] for row in items[0]["gst_rates"]}
@@ -100,7 +99,9 @@ class RichExportTests(unittest.TestCase):
             destination_store.set_cursor(store, other.id, "voucher", 50)
 
             tally = MagicMock()
-            tally.company_info.return_value = {"name": "Demo Co", "guid": "co-1", "gstin": None}
+            company = {"name": "Demo Co", "guid": "co-1", "gstin": None}
+            tally.company_info.return_value = company
+            tally.list_companies.return_value = [company]
             tally.export_voucher_type_bases.return_value = {
                 "sales": "Sales",
                 "purchase": "Purchase",
@@ -142,7 +143,9 @@ class RichExportTests(unittest.TestCase):
             plus = Destination(id="pluschwood", label="Pluschwood Console", base_url="https://console.pluschwood.com")
             destination_store.save_destinations(store, [plus])
             tally = MagicMock()
-            tally.company_info.return_value = {"name": "Demo Co", "guid": "co-1"}
+            company = {"name": "Demo Co", "guid": "co-1"}
+            tally.company_info.return_value = company
+            tally.list_companies.return_value = [company]
             tally.export_voucher_type_bases.return_value = {"sales": "Sales"}
             pages = {
                 "Ledger": [
@@ -163,8 +166,48 @@ class RichExportTests(unittest.TestCase):
             runner = ImportRunner(store, tally, [(plus, client)], config, force_destination_ids={plus.id})
             result = runner.run(force=False)
             self.assertEqual(result["destinations"][plus.id]["error"], "reject")
-            # Company send succeeds; first ledger send fails, so cursor stays at 0.
-            self.assertEqual(destination_store.get_cursor(store, plus.id, "ledger"), 0)
+            self.assertEqual(destination_store.get_cursor(store, plus.id, "ledger", company_guid="co-1"), 0)
+
+    def test_one_connection_imports_all_open_companies(self):
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder)
+            store = LocalStore(data / "agent.sqlite3")
+            dest = destination_store.upsert_destination(
+                store,
+                label="Pluschwood Console",
+                base_url="https://console.pluschwood.com",
+                destination_id="pluschwood",
+            )
+            destination_store.set_cursor(store, dest.id, "ledger", 27, company_guid="second")
+            tally = MagicMock()
+            tally.list_companies.return_value = [
+                {"guid": "first", "name": "First Timber"},
+                {"guid": "second", "name": "Second Timber"},
+            ]
+            tally.export_collection.return_value = []
+            tally.export_voucher_type_bases.return_value = {}
+            client = MagicMock()
+            runner = ImportRunner(
+                store,
+                tally,
+                [(dest, client)],
+                AgentConfig(data_dir=data),
+                force_destination_ids={dest.id},
+            )
+            result = runner.run(
+                companies=[
+                    {"guid": "first", "name": "First Timber"},
+                    {"guid": "second", "name": "Second Timber"},
+                ]
+            )
+            companies = result["destinations"][dest.id]["companies"]
+            self.assertIn("first", companies)
+            self.assertIn("second", companies)
+            guids = [call.args[0]["company"]["guid"] for call in client.import_batch.call_args_list]
+            self.assertIn("first", guids)
+            self.assertIn("second", guids)
+            # Force reset clears the second company ledger cursor.
+            self.assertEqual(destination_store.get_cursor(store, dest.id, "ledger", company_guid="second"), 0)
 
 
 if __name__ == "__main__":

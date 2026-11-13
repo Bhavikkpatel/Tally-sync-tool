@@ -180,11 +180,64 @@ HTML = """<!DOCTYPE html>
     font-size: 12px;
     margin-top: 4px;
   }
+  table.companies .status-connected { color: var(--ok); font-weight: 600; }
+  table.companies .status-pending { color: var(--muted); font-weight: 600; }
   .empty-companies {
     padding: 28px 16px;
     text-align: center;
     color: var(--muted);
   }
+  .log-panel {
+    margin-top: 22px;
+    background: #0b1220;
+    border: 1px solid #1f2937;
+    border-radius: 10px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 220px;
+    max-height: min(42vh, 360px);
+  }
+  .log-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #111827;
+    border-bottom: 1px solid #1f2937;
+    color: #e5e7eb;
+  }
+  .log-header .title {
+    font-weight: 650;
+    letter-spacing: 0.02em;
+  }
+  .log-header .hint {
+    color: #9ca3af;
+    font-size: 12px;
+  }
+  .log-header .spacer { flex: 1; }
+  .log-header button {
+    appearance: none;
+    border: 1px solid #374151;
+    background: #1f2937;
+    color: #e5e7eb;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .log-header button:hover { background: #374151; }
+  #live-log {
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    flex: 1;
+    font: 12px/1.45 Consolas, "Cascadia Mono", "Courier New", monospace;
+    color: #d1fae5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #live-log .empty { color: #6b7280; }
   .ok { color: var(--ok); }
   .bad { color: var(--bad); }
 
@@ -251,7 +304,8 @@ HTML = """<!DOCTYPE html>
         <button type="button" data-action="sync">Sync now</button>
         <button type="button" data-action="mapping">Ledger mapping…</button>
         <div class="sep"></div>
-        <button type="button" data-action="log">Open sync log</button>
+        <button type="button" data-action="show_log">Show live log</button>
+        <button type="button" data-action="log">Open log file…</button>
       </div>
     </div>
     <div class="menu" data-menu="settings">
@@ -268,20 +322,31 @@ HTML = """<!DOCTYPE html>
   <main class="content">
     <section class="view active" id="view-home">
       <h1>Home</h1>
-      <p class="lead">Companies open in Tally and the last successful sync for each.</p>
+      <p class="lead">Open Tally companies. Sign in once, then Sync imports every company listed here.</p>
       <div class="home-meta" id="summary-meta">—</div>
       <div class="company-table-wrap">
         <table class="companies">
           <thead>
             <tr>
               <th>Company</th>
+              <th>Status</th>
               <th>Last sync</th>
             </tr>
           </thead>
           <tbody id="company-rows">
-            <tr><td colspan="2" class="empty-companies">Waiting for Tally…</td></tr>
+            <tr><td colspan="3" class="empty-companies">Waiting for Tally…</td></tr>
           </tbody>
         </table>
+      </div>
+      <div class="log-panel" id="log-panel">
+        <div class="log-header">
+          <div class="title">Live log</div>
+          <div class="hint" id="log-hint">Updating…</div>
+          <div class="spacer"></div>
+          <button type="button" id="btn-clear-log-view" title="Clear the on-screen view only">Clear view</button>
+          <button type="button" data-action="log">Open file</button>
+        </div>
+        <pre id="live-log"><span class="empty">Waiting for sync activity…</span></pre>
       </div>
     </section>
 
@@ -337,12 +402,22 @@ HTML = """<!DOCTYPE html>
       closeMenus();
       if (action === 'home') showView('home');
       else if (action === 'show_settings') showView('settings');
+      else if (action === 'show_log') {
+        showView('home');
+        const panel = document.getElementById('log-panel');
+        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
       else api(action);
       event.stopPropagation();
     }
   });
 
   document.addEventListener('click', () => closeMenus());
+  document.getElementById('btn-clear-log-view').addEventListener('click', () => {
+    const el = document.getElementById('live-log');
+    el.innerHTML = '<span class="empty">View cleared — new lines will appear here.</span>';
+    window.__logIgnoreCount = (window.__logLineCount || 0);
+  });
 
   async function api(name, payload) {
     const flash = document.getElementById('flash');
@@ -376,26 +451,46 @@ HTML = """<!DOCTYPE html>
     const body = document.getElementById('company-rows');
     const companies = data.companies || [];
     if (!data.tally_ok) {
-      body.innerHTML = '<tr><td colspan="2" class="empty-companies bad">' +
+      body.innerHTML = '<tr><td colspan="3" class="empty-companies bad">' +
         esc(data.tally || 'Tally offline') + '</td></tr>';
       return;
     }
     if (!companies.length) {
-      body.innerHTML = '<tr><td colspan="2" class="empty-companies">No companies open in Tally</td></tr>';
+      body.innerHTML = '<tr><td colspan="3" class="empty-companies">No companies open in Tally</td></tr>';
       return;
     }
     body.innerHTML = companies.map((company) => {
       const gstin = company.gstin
         ? '<div class="gstin">GSTIN ' + esc(company.gstin) + '</div>'
         : '';
-      const kind = company.last_sync_at
-        ? '<div class="kind">' + esc(company.last_sync_kind || 'sync') + '</div>'
+      const connected = !!company.connected;
+      const statusClass = connected ? 'status-connected' : 'status-pending';
+      const kind = company.last_sync_kind
+        ? '<div class="kind">' + esc(company.last_sync_kind) + '</div>'
         : '';
       return '<tr>' +
         '<td><div class="name">' + esc(company.name || '—') + '</div>' + gstin + '</td>' +
+        '<td><div class="' + statusClass + '">' + esc(company.connection || (connected ? 'Connected' : 'Not connected')) + '</div></td>' +
         '<td><div class="sync">' + esc(company.last_sync_display || 'Never') + '</div>' + kind + '</td>' +
         '</tr>';
     }).join('');
+  }
+
+  function renderLiveLog(data) {
+    const el = document.getElementById('live-log');
+    const hint = document.getElementById('log-hint');
+    const lines = data.log_lines || [];
+    window.__logLineCount = lines.length;
+    const ignore = window.__logIgnoreCount || 0;
+    const visible = lines.slice(ignore);
+    const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+    if (!visible.length) {
+      el.innerHTML = '<span class="empty">Waiting for sync activity…</span>';
+    } else {
+      el.textContent = visible.join('\n');
+    }
+    hint.textContent = (data.log_path ? data.log_path : 'sync.log') + ' · ' + lines.length + ' lines';
+    if (stick) el.scrollTop = el.scrollHeight;
   }
 
   async function refresh() {
@@ -406,6 +501,7 @@ HTML = """<!DOCTYPE html>
       (data.destinations || 'no destinations') + ' · ' +
       (data.mapping || 'mapping needed');
     renderCompanies(data);
+    renderLiveLog(data);
     document.getElementById('version').textContent = 'v' + (data.version || '');
     document.getElementById('statusbar').textContent = data.status || 'Ready';
     document.getElementById('tally_url').value = data.tally_url || '';
@@ -428,7 +524,7 @@ HTML = """<!DOCTYPE html>
 
   window.addEventListener('pywebviewready', () => {
     refresh();
-    setInterval(refresh, 5000);
+    setInterval(refresh, 1500);
   });
 </script>
 </body>
@@ -527,9 +623,9 @@ class MainWindow:
             APP_NAME,
             html=HTML.replace("__APP_NAME__", APP_NAME),
             js_api=self._api,
-            width=920,
-            height=640,
-            min_size=(760, 520),
+            width=960,
+            height=760,
+            min_size=(800, 620),
         )
 
         def on_closing() -> bool:

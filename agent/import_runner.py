@@ -46,27 +46,37 @@ class ImportRunner:
                 force and destination_store.is_pluschwood(destination)
             )
             if forced:
-                destination_store.reset_import(self.store, destination.id)
-                active.append((destination, client))
+                active.append((destination, client, True))
             elif incremental or not destination_store.import_done(self.store, destination.id):
-                active.append((destination, client))
+                active.append((destination, client, False))
         if not active:
             self._log("Import skipped — already complete for all destinations")
             return {"skipped": True, "reason": "initial import already completed for all destinations"}
 
         run_id = self.store.begin_run("import")
         if companies is None:
-            companies = self.tally.list_companies() if any(item.company_guid for item, _ in active) else [self.tally.company_info()]
-        available = {str(company.get("guid")): company for company in companies if company.get("guid")}
-        company = next(iter(available.values()), {})
+            if any(destination_store.is_pluschwood(destination) for destination, _client, _forced in active):
+                companies = self.tally.list_companies() or [self.tally.company_info()]
+            else:
+                companies = [self.tally.company_info()]
+        available = {
+            str(company.get("guid")): company
+            for company in companies
+            if company.get("guid") and company.get("name")
+        }
+        fallback = next(iter(available.values()), {})
         summary: dict[str, Any] = {
-            "company": {"name": company.get("name"), "guid": company.get("guid"), "gstin": company.get("gstin")},
+            "company": {
+                "name": fallback.get("name"),
+                "guid": fallback.get("guid"),
+                "gstin": fallback.get("gstin"),
+            },
             "destinations": {},
             "from_date": self.config.import_from_date,
             "to_date": self.config.import_to_date,
         }
         self._log(
-            f"Import start · company={company.get('name') or 'unknown'}",
+            f"Import start · companies={len(available) or 1}",
             {
                 "destinations": len(active),
                 "from_date": self.config.import_from_date or "all",
@@ -74,15 +84,32 @@ class ImportRunner:
             },
         )
         try:
-            for destination, client in active:
-                selected = available.get(destination.company_guid) if destination.company_guid else company
-                if not selected or not selected.get("name"):
-                    continue
-                try:
-                    summary["destinations"][destination.id] = self._import_destination(destination, client, selected)
-                except Exception as exc:
-                    summary["destinations"][destination.id] = {"error": str(exc)}
-                    self._log(f"{destination.label} · Import failed: {exc}")
+            for destination, client, forced in active:
+                company_list = self._companies_for_destination(destination, available, fallback)
+                if forced:
+                    destination_store.reset_import(
+                        self.store,
+                        destination.id,
+                        company_guids=[str(item.get("guid")) for item in company_list if item.get("guid")],
+                    )
+                company_results: dict[str, Any] = {}
+                for selected in company_list:
+                    key = str(selected.get("guid") or selected.get("name") or destination.id)
+                    try:
+                        company_results[key] = self._import_destination(destination, client, selected)
+                    except Exception as exc:
+                        company_results[key] = {"error": str(exc), "company": selected.get("name")}
+                        self._log(f"{selected.get('name') or destination.label} · Import failed: {exc}")
+                failed = any(result.get("error") for result in company_results.values())
+                if not failed and company_results:
+                    destination_store.set_import_done(self.store, destination.id, True)
+                summary["destinations"][destination.id] = {
+                    "companies": company_results,
+                    "error": next(
+                        (result.get("error") for result in company_results.values() if result.get("error")),
+                        None,
+                    ),
+                }
             if all(destination_store.import_done(self.store, destination.id) for destination, _ in self.targets):
                 self.store.set_meta("initial_import_done", True)
             failed = any(result.get("error") for result in summary["destinations"].values())
@@ -93,6 +120,21 @@ class ImportRunner:
             self.store.finish_run(run_id, "failed", {"error": str(exc), **summary})
             self._log(f"Import failed: {exc}")
             raise
+
+    def _companies_for_destination(
+        self,
+        destination: Destination,
+        available: dict[str, dict[str, Any]],
+        fallback: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        # One Pluschwood connection syncs every open Tally company.
+        if destination_store.is_pluschwood(destination):
+            if available:
+                return list(available.values())
+            return [fallback] if fallback.get("name") else []
+        if destination.company_guid and destination.company_guid in available:
+            return [available[destination.company_guid]]
+        return [fallback] if fallback.get("name") else []
 
     def _import_destination(
         self,
@@ -105,8 +147,11 @@ class ImportRunner:
         if rich and not include_banking:
             self._log(f"{destination.label}: banking omitted (destination is not HTTPS)")
         company_name = company.get("name")
+        company_guid = str(company.get("guid") or "")
+        label = company_name or destination.label
         dest_summary: dict[str, Any] = {
-            "label": destination.label,
+            "label": label,
+            "company_guid": company_guid,
             "rich": rich,
             "masters": {},
             "vouchers": {},
@@ -120,7 +165,7 @@ class ImportRunner:
 
         self._send(
             client,
-            destination,
+            label,
             {
                 "phase": "company",
                 "company": company,
@@ -136,7 +181,9 @@ class ImportRunner:
         for collection in tally_xml.MASTER_COLLECTIONS:
             imported = 0
             while True:
-                cursor = destination_store.get_cursor(self.store, destination.id, collection)
+                cursor = destination_store.get_cursor(
+                    self.store, destination.id, collection, company_guid=company_guid
+                )
                 page = self.tally.export_collection(
                     collection,
                     from_alter_id=cursor,
@@ -151,7 +198,7 @@ class ImportRunner:
                     break
                 self._send(
                     client,
-                    destination,
+                    label,
                     {
                         "phase": "masters",
                         "master_type": collection,
@@ -168,14 +215,13 @@ class ImportRunner:
                 )
                 imported += len(page)
                 next_cursor = max(item.get("alter_id", cursor) for item in page)
-                destination_store.set_cursor(self.store, destination.id, collection, next_cursor)
+                destination_store.set_cursor(
+                    self.store, destination.id, collection, next_cursor, company_guid=company_guid
+                )
                 if len(page) < self.config.import_page_size:
                     break
             dest_summary["masters"][collection] = imported
-            self._log(
-                f"{destination.label} · master {collection} total",
-                {"synced": imported},
-            )
+            self._log(f"{label} · master {collection} total", {"synced": imported})
             if collection.lower() in {"ledger", "stockitem"} and imported == 0:
                 dest_summary["warnings"].append(f"{collection} export returned zero records for the selected company")
 
@@ -184,7 +230,9 @@ class ImportRunner:
 
         voucher_counts: dict[str, int] = {}
         while True:
-            cursor = destination_store.get_cursor(self.store, destination.id, "voucher")
+            cursor = destination_store.get_cursor(
+                self.store, destination.id, "voucher", company_guid=company_guid
+            )
             page = self.tally.export_collection(
                 "Voucher",
                 from_alter_id=cursor,
@@ -225,7 +273,7 @@ class ImportRunner:
             if filtered:
                 self._send(
                     client,
-                    destination,
+                    label,
                     {
                         "phase": "vouchers",
                         "company": {"name": company_name, "guid": company.get("guid")},
@@ -244,10 +292,12 @@ class ImportRunner:
                 )
             else:
                 self._log(
-                    f"{destination.label} · vouchers page skipped (no Sales/Purchase/Receipt/Payment)",
+                    f"{label} · vouchers page skipped (no Sales/Purchase/Receipt/Payment)",
                     {"scanned": len(page), "after_alter_id": cursor},
                 )
-            destination_store.set_cursor(self.store, destination.id, "voucher", next_cursor)
+            destination_store.set_cursor(
+                self.store, destination.id, "voucher", next_cursor, company_guid=company_guid
+            )
             if len(page) < self.config.import_page_size:
                 break
 
@@ -259,7 +309,7 @@ class ImportRunner:
 
         self._send(
             client,
-            destination,
+            label,
             {
                 "phase": "complete",
                 "company": {"name": company_name, "guid": company.get("guid")},
@@ -274,9 +324,9 @@ class ImportRunner:
             },
             batch_counts={"phase": "complete", "records": 0},
         )
-        destination_store.set_import_done(self.store, destination.id, True)
+        destination_store.set_import_done(self.store, destination.id, True, company_guid=company_guid)
         self._log(
-            f"{destination.label} · import summary",
+            f"{label} · import summary",
             {
                 **{f"master_{k}": v for k, v in dest_summary["masters"].items()},
                 **{f"voucher_{k}": v for k, v in voucher_counts.items()},
@@ -287,13 +337,13 @@ class ImportRunner:
             },
         )
         for warning in dest_summary["warnings"]:
-            self._log(f"{destination.label}: {warning}")
+            self._log(f"{label}: {warning}")
         return dest_summary
 
     def _send(
         self,
         client: AutoSyncClient,
-        destination: Destination,
+        label: str,
         payload: dict,
         *,
         batch_counts: dict[str, Any],
@@ -302,6 +352,6 @@ class ImportRunner:
         _ = tally_xml.strip_banking(payload) if isinstance(payload, dict) else payload
         client.import_batch(payload)
         self._log(
-            f"{destination.label} · accepted {payload.get('phase')}",
+            f"{label} · accepted {payload.get('phase')}",
             batch_counts,
         )
