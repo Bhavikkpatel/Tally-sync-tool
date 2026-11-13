@@ -1,0 +1,29 @@
+<ENVELOPE>
+ <BODY>
+  <DATA>
+   <COLLECTION>
+    <LEDGER NAME="Acme Motors" RESERVEDNAME="">
+     <GUID>led-acme-001</GUID>
+     <ALTERID>12</ALTERID>
+     <PARENT>Sundry Debtors</PARENT>
+     <LEDGSTREGDETAILS.LIST>
+      <GSTIN>29ABCDE1234F1Z5</GSTIN>
+      <STATE>Karnataka</STATE>
+     </LEDGSTREGDETAILS.LIST>
+     <ADDRESS.LIST>
+      <ADDRESS>Peenya Industrial Area</ADDRESS>
+     </ADDRESS.LIST>
+    </LEDGER>
+    <LEDGER NAME="Box Board Suppliers" RESERVEDNAME="">
+     <GUID>led-supp-001</GUID>
+     <ALTERID>18</ALTERID>
+     <PARENT>Sundry Creditors</PARENT>
+     <LEDGSTREGDETAILS.LIST>
+      <GSTIN>33AACCZ6291R1ZI</GSTIN>
+      <STATE>Tamil Nadu</STATE>
+     </LEDGSTREGDETAILS.LIST>
+    </LEDGER>
+   </COLLECTION>
+  </DATA>
+ </BODY>
+</ENVELOPE>
