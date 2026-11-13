@@ -342,6 +342,44 @@ class SyncApp:
                 targets = [(item, client) for item, client in targets if item.id in forced]
             self._import_companies(targets, forced)
 
+    def export_parties(self) -> None:
+        """Re-export Tally ledgers and push OMS customer/vendor party batches."""
+        try:
+            if not self.paired():
+                self.last_message = "Sign in once before exporting customers & vendors"
+                self._progress(self.last_message)
+                return
+            health = self.tally.health()
+            if not health.get("ok"):
+                self.last_message = f"Tally offline: {health.get('error') or 'unreachable'}"
+                self._progress(self.last_message)
+                return
+            companies = [
+                company
+                for company in health.get("companies") or []
+                if company.get("guid") and company.get("name")
+            ]
+            with self._import_lock:
+                targets = list(self._company_targets())
+                forced = {destination.id for destination, _client in targets}
+                # Replay Group + Ledger so party roles resolve, then parties phase is sent.
+                for destination, _client in targets:
+                    for company in companies:
+                        guid = str(company.get("guid") or "")
+                        destination_store.set_cursor(self.store, destination.id, "group", 0, company_guid=guid)
+                        destination_store.set_cursor(self.store, destination.id, "ledger", 0, company_guid=guid)
+                        destination_store.set_import_done(
+                            self.store, destination.id, False, company_guid=guid
+                        )
+                self._progress("Exporting ledger masters and OMS customers/vendors")
+                self._import_companies(targets, forced, incremental=False, companies=companies)
+            self.last_message = "Customers & vendors export finished — check Live log"
+            self._progress(self.last_message)
+        except Exception as exc:
+            self.last_message = f"Customers & vendors export failed: {exc}"
+            self._progress(self.last_message)
+            traceback.print_exc()
+
     def _import_companies(self, targets, forced, *, incremental=False, companies=None):
         if not targets:
             return
@@ -720,6 +758,7 @@ class SyncApp:
             on_sign_in=self.sign_in_connect,
             on_pair=self.pair,
             on_import=lambda: self.run_import(force=True),
+            on_export_parties=self.export_parties,
             on_sync_now=self.sync_now,
             on_mapping=self.configure_mapping,
             on_open_log=open_sync_log,

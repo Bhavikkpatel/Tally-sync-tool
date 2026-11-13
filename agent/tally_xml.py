@@ -527,13 +527,87 @@ def _list_children(node: ET.Element, *names: str) -> list[ET.Element]:
     return [child for child in list(node) if _tag(child) in wanted]
 
 
+def group_parent_map(groups: list[dict[str, Any]]) -> dict[str, str]:
+    """Map group name (lower) → immediate parent name for party-role ancestry."""
+    mapping: dict[str, str] = {}
+    for item in groups or []:
+        name = (item.get("name") or "").strip()
+        if not name:
+            continue
+        parent = (item.get("parent") or (item.get("fields") or {}).get("parent") or "").strip()
+        mapping[name.lower()] = parent
+    return mapping
+
+
+def resolve_party_role(parent: str | None, group_parents: dict[str, str] | None = None) -> str | None:
+    """
+    Map Tally ledger groups to OMS entities.
+    - under Sundry Debtors → customer
+    - under Sundry Creditors → vendor
+    Walks nested groups when group_parents is provided.
+    """
+    current = (parent or "").strip()
+    seen: set[str] = set()
+    for _ in range(24):
+        if not current:
+            return None
+        key = current.lower()
+        if key in seen:
+            break
+        seen.add(key)
+        if "sundry debtor" in key or key in {"debtors", "customer", "customers"}:
+            return "customer"
+        if "sundry creditor" in key or key in {"creditors", "supplier", "suppliers", "vendor", "vendors"}:
+            return "vendor"
+        if not group_parents:
+            break
+        current = (group_parents.get(key) or "").strip()
+    return None
+
+
+def enrich_party_roles(ledgers: list[dict[str, Any]], group_parents: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    for item in ledgers or []:
+        parent = item.get("parent") or (item.get("fields") or {}).get("parent")
+        role = resolve_party_role(parent, group_parents)
+        item["party_role"] = role
+        if role:
+            item["oms_entity"] = role  # customer | vendor
+        else:
+            item.pop("oms_entity", None)
+    return ledgers
+
+
+def party_payload(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Strip chart-of-accounts noise; keep fields OMS needs for customers/vendors."""
+    role = ledger.get("party_role") or ledger.get("oms_entity")
+    payload = {
+        "stable_id": ledger.get("stable_id") or ledger.get("guid"),
+        "guid": ledger.get("guid"),
+        "alter_id": ledger.get("alter_id"),
+        "name": ledger.get("name"),
+        "parent": ledger.get("parent"),
+        "party_role": role,
+        "oms_entity": role,
+        "contact_name": ledger.get("contact_name"),
+        "phone": ledger.get("phone"),
+        "email": ledger.get("email"),
+        "pan": ledger.get("pan"),
+        "gstin": ledger.get("gstin"),
+        "state": ledger.get("state"),
+        "addresses": ledger.get("addresses") or [],
+        "gst_registrations": ledger.get("gst_registrations") or [],
+        "banking": ledger.get("banking"),
+        "cancelled": bool(ledger.get("cancelled")),
+        "deleted": bool(ledger.get("deleted")),
+    }
+    if not payload.get("banking"):
+        payload.pop("banking", None)
+    return payload
+
+
 def _ledger_fields(node: ET.Element, fields: dict[str, Any], *, include_banking: bool) -> dict[str, Any]:
     parent = _direct_text(node, "PARENT") or fields.get("parent")
-    role = None
-    if (parent or "").strip().lower() == "sundry debtors":
-        role = "customer"
-    elif (parent or "").strip().lower() == "sundry creditors":
-        role = "supplier"
+    role = resolve_party_role(parent)
     addresses = []
     for block in _list_children(node, "ADDRESS.LIST"):
         lines = [_text(item, None) for item in list(block) if _tag(item) == "ADDRESS"]
@@ -570,7 +644,7 @@ def _ledger_fields(node: ET.Element, fields: dict[str, Any], *, include_banking:
         }
         if not any(banking.get(key) for key in ("bank_name", "account_number", "ifsc", "branch")):
             banking = None
-    return {
+    payload = {
         "parent": parent,
         "party_role": role,
         "contact_name": _direct_text(node, "LEDGERCONTACT", "CONTACTPERSON"),
@@ -583,6 +657,9 @@ def _ledger_fields(node: ET.Element, fields: dict[str, Any], *, include_banking:
         "gst_registrations": gst_registrations,
         "banking": banking,
     }
+    if role:
+        payload["oms_entity"] = role
+    return payload
 
 
 def _stock_item_fields(node: ET.Element, fields: dict[str, Any]) -> dict[str, Any]:

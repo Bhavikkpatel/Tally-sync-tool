@@ -172,12 +172,15 @@ class ImportRunner:
                 "contract_version": "pluschwood_tally_v2" if rich else "autosync_tally_v1",
                 "masters": [],
                 "vouchers": [],
+                "parties": [],
                 "done": False,
             },
             batch_counts={"phase": "company", "records": 1},
         )
 
         voucher_type_bases: dict[str, str] = {}
+        group_parents: dict[str, str] = {}
+        party_batches: list[dict[str, Any]] = []
         for collection in tally_xml.MASTER_COLLECTIONS:
             imported = 0
             while True:
@@ -192,6 +195,19 @@ class ImportRunner:
                     rich=rich,
                     include_banking=include_banking and collection.lower() == "ledger",
                 )
+                if collection.lower() == "group":
+                    # Ensure parent is top-level for ancestry walks.
+                    for item in page:
+                        if not item.get("parent"):
+                            item["parent"] = (item.get("fields") or {}).get("parent")
+                    group_parents.update(tally_xml.group_parent_map(page))
+                if collection.lower() == "ledger":
+                    tally_xml.enrich_party_roles(page, group_parents)
+                    party_batches.extend(
+                        tally_xml.party_payload(item)
+                        for item in page
+                        if item.get("party_role") in {"customer", "vendor"}
+                    )
                 if collection.lower() == "vouchertype":
                     voucher_type_bases.update(tally_xml.voucher_type_base_map(page))
                 if not page:
@@ -205,6 +221,7 @@ class ImportRunner:
                         "company": {"name": company_name, "guid": company.get("guid")},
                         "masters": page,
                         "vouchers": [],
+                        "parties": [],
                         "done": False,
                     },
                     batch_counts={
@@ -224,6 +241,43 @@ class ImportRunner:
             self._log(f"{label} · master {collection} total", {"synced": imported})
             if collection.lower() in {"ledger", "stockitem"} and imported == 0:
                 dest_summary["warnings"].append(f"{collection} export returned zero records for the selected company")
+
+        # Dedicated OMS customer/vendor sync (Sundry Debtors / Sundry Creditors ledgers).
+        if party_batches:
+            chunk_size = max(1, int(self.config.import_page_size or 200))
+            customers = sum(1 for item in party_batches if item.get("oms_entity") == "customer")
+            vendors = sum(1 for item in party_batches if item.get("oms_entity") == "vendor")
+            for index in range(0, len(party_batches), chunk_size):
+                chunk = party_batches[index : index + chunk_size]
+                self._send(
+                    client,
+                    label,
+                    {
+                        "phase": "parties",
+                        "contract_version": "pluschwood_tally_v2" if rich else "autosync_tally_v1",
+                        "company": {"name": company_name, "guid": company.get("guid")},
+                        "masters": [],
+                        "vouchers": [],
+                        "parties": chunk,
+                        "done": False,
+                    },
+                    batch_counts={
+                        "phase": "parties",
+                        "synced": len(chunk),
+                        "customers": sum(1 for item in chunk if item.get("oms_entity") == "customer"),
+                        "vendors": sum(1 for item in chunk if item.get("oms_entity") == "vendor"),
+                    },
+                )
+            dest_summary["parties"] = {"customers": customers, "vendors": vendors, "total": len(party_batches)}
+            self._log(
+                f"{label} · parties (OMS customers/vendors)",
+                {"customers": customers, "vendors": vendors, "total": len(party_batches)},
+            )
+        else:
+            dest_summary["parties"] = {"customers": 0, "vendors": 0, "total": 0}
+            dest_summary["warnings"].append(
+                "No Sundry Debtors/Creditors ledgers found to map as OMS customers/vendors"
+            )
 
         if not voucher_type_bases:
             voucher_type_bases = self.tally.export_voucher_type_bases(company_name=company_name)
@@ -281,6 +335,7 @@ class ImportRunner:
                         "to_date": self.config.import_to_date,
                         "masters": [],
                         "vouchers": filtered,
+                        "parties": [],
                         "done": False,
                     },
                     batch_counts={
@@ -320,16 +375,20 @@ class ImportRunner:
                 },
                 "masters": [],
                 "vouchers": [],
+                "parties": [],
                 "done": True,
             },
             batch_counts={"phase": "complete", "records": 0},
         )
         destination_store.set_import_done(self.store, destination.id, True, company_guid=company_guid)
+        parties = dest_summary.get("parties") or {}
         self._log(
             f"{label} · import summary",
             {
                 **{f"master_{k}": v for k, v in dest_summary["masters"].items()},
                 **{f"voucher_{k}": v for k, v in voucher_counts.items()},
+                "parties_customers": parties.get("customers", 0),
+                "parties_vendors": parties.get("vendors", 0),
                 "with_party": dest_summary["vouchers_with_party"],
                 "with_amount": dest_summary["vouchers_with_amount"],
                 "with_lines": dest_summary["vouchers_with_lines"],
