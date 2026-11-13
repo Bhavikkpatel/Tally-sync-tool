@@ -33,13 +33,25 @@ class TallyClient:
 
     def health(self) -> dict[str, Any]:
         try:
-            info = self.company_info()
-            return {"ok": True, "company": info.get("name") or "", "detail": info}
+            companies = self.list_companies()
+            info = companies[0] if companies else {}
+            return {
+                "ok": True,
+                "company": info.get("name") or "",
+                "detail": info,
+                "companies": companies,
+            }
         except Exception as exc:
-            return {"ok": False, "company": "", "error": str(exc)}
+            return {"ok": False, "company": "", "companies": [], "error": str(exc)}
+
+    def list_companies(self) -> list[dict[str, Any]]:
+        return tally_xml.parse_companies(self.post(tally_xml.company_info_request(), timeout=self.health_timeout))
 
     def company_info(self) -> dict[str, Any]:
-        return tally_xml.parse_company_info(self.post(tally_xml.company_info_request(), timeout=self.health_timeout))
+        companies = self.list_companies()
+        if companies:
+            return companies[0]
+        return {"name": None, "guid": None, "gstin": None, "state": None, "address": None}
 
     def export_collection(
         self,

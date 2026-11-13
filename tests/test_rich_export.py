@@ -161,8 +161,8 @@ class RichExportTests(unittest.TestCase):
             client.import_batch.side_effect = [None, RuntimeError("reject"), None]
             config = AgentConfig(data_dir=Path(folder), import_page_size=50)
             runner = ImportRunner(store, tally, [(plus, client)], config, force_destination_ids={plus.id})
-            with self.assertRaises(RuntimeError):
-                runner.run(force=False)
+            result = runner.run(force=False)
+            self.assertEqual(result["destinations"][plus.id]["error"], "reject")
             # Company send succeeds; first ledger send fails, so cursor stays at 0.
             self.assertEqual(destination_store.get_cursor(store, plus.id, "ledger"), 0)
 

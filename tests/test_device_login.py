@@ -62,13 +62,16 @@ class DeviceLoginTests(unittest.TestCase):
             app.tally.health.return_value = {
                 "ok": True,
                 "company": "Demo Co",
+                "companies": [{"guid": "co-1", "name": "Demo Co"}],
                 "detail": {"guid": "co-1", "name": "Demo Co", "gstin": None},
             }
+            import threading
+            app._import_lock = threading.Lock()
             app.scheduler = MagicMock()
             app.last_message = ""
             app._progress = lambda message: None
             import_calls = []
-            app.run_import = lambda force=False: import_calls.append(force)
+            app.run_import = lambda force_destination_ids: import_calls.append(force_destination_ids)
 
             with patch("agent.__main__.webbrowser.open") as open_browser, patch(
                 "agent.__main__.AutoSyncClient"
@@ -95,7 +98,7 @@ class DeviceLoginTests(unittest.TestCase):
             self.assertEqual(len(destinations), 1)
             token = load_token(destinations[0].token_path(data_dir))
             self.assertEqual(token, "install-token")
-            self.assertEqual(import_calls, [True])
+            self.assertEqual(import_calls, [{destinations[0].id}])
             self.assertEqual(app.store.get_meta("installation_id_console-pluschwood-com") or app.store.get_meta(
                 f"installation_id_{destinations[0].id}"
             ), 3)

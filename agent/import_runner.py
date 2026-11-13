@@ -39,7 +39,7 @@ class ImportRunner:
         line = sync_log.log_event(message, data_dir=self.config.data_dir, counts=counts)
         self.on_progress(line)
 
-    def run(self, force: bool = False) -> dict[str, Any]:
+    def run(self, force: bool = False, *, incremental: bool = False, companies: list[dict] | None = None) -> dict[str, Any]:
         active = []
         for destination, client in self.targets:
             forced = destination.id in self.force_destination_ids or (
@@ -48,14 +48,17 @@ class ImportRunner:
             if forced:
                 destination_store.reset_import(self.store, destination.id)
                 active.append((destination, client))
-            elif not destination_store.import_done(self.store, destination.id):
+            elif incremental or not destination_store.import_done(self.store, destination.id):
                 active.append((destination, client))
         if not active:
             self._log("Import skipped — already complete for all destinations")
             return {"skipped": True, "reason": "initial import already completed for all destinations"}
 
         run_id = self.store.begin_run("import")
-        company = self.tally.company_info()
+        if companies is None:
+            companies = self.tally.list_companies() if any(item.company_guid for item, _ in active) else [self.tally.company_info()]
+        available = {str(company.get("guid")): company for company in companies if company.get("guid")}
+        company = next(iter(available.values()), {})
         summary: dict[str, Any] = {
             "company": {"name": company.get("name"), "guid": company.get("guid"), "gstin": company.get("gstin")},
             "destinations": {},
@@ -72,15 +75,19 @@ class ImportRunner:
         )
         try:
             for destination, client in active:
-                summary["destinations"][destination.id] = self._import_destination(
-                    destination,
-                    client,
-                    company,
-                )
+                selected = available.get(destination.company_guid) if destination.company_guid else company
+                if not selected or not selected.get("name"):
+                    continue
+                try:
+                    summary["destinations"][destination.id] = self._import_destination(destination, client, selected)
+                except Exception as exc:
+                    summary["destinations"][destination.id] = {"error": str(exc)}
+                    self._log(f"{destination.label} · Import failed: {exc}")
             if all(destination_store.import_done(self.store, destination.id) for destination, _ in self.targets):
                 self.store.set_meta("initial_import_done", True)
-            self.store.finish_run(run_id, "ok", summary)
-            self._log("Import complete")
+            failed = any(result.get("error") for result in summary["destinations"].values())
+            self.store.finish_run(run_id, "failed" if failed else "ok", summary)
+            self._log("Import finished with errors" if failed else "Import complete")
             return summary
         except Exception as exc:
             self.store.finish_run(run_id, "failed", {"error": str(exc), **summary})

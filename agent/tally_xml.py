@@ -109,7 +109,7 @@ def company_info_request() -> str:
    </STATICVARIABLES>
    <TDL>
     <TDLMESSAGE>
-     <COLLECTION NAME="AutoSyncCompany" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="No" ISOPTION="No" ISINTERNAL="No">
+     <COLLECTION NAME="AutoSyncCompany" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="Yes" ISOPTION="No" ISINTERNAL="No">
       <TYPE>Company</TYPE>
       <FETCH>NAME, GUID, STATENAME, COMPANYNUMBER, INCOMETAXNUMBER, GSTREGISTRATIONNUMBER, ADDRESS</FETCH>
      </COLLECTION>
@@ -754,28 +754,41 @@ def parse_import_response(xml_text: str) -> dict[str, Any]:
     }
 
 
-def parse_company_info(xml_text: str) -> dict[str, Any]:
+def _company_from_object(item: dict[str, Any]) -> dict[str, Any]:
+    fields = item.get("fields") or {}
+    return {
+        "name": item.get("name") or fields.get("name"),
+        "guid": item.get("guid") or fields.get("guid"),
+        "gstin": (
+            fields.get("gstregistrationnumber")
+            or fields.get("companynumber")
+            or fields.get("gstin")
+            or fields.get("incometaxnumber")
+        ),
+        "state": fields.get("statename") or fields.get("priorstatename") or fields.get("state"),
+        "address": fields.get("address"),
+        "raw": item,
+    }
+
+
+def parse_companies(xml_text: str) -> list[dict[str, Any]]:
+    """Return every company Tally reports (open/loaded companies)."""
     objects = [
         item
         for item in parse_objects(xml_text, "COMPANY", rich=True)
         if (item.get("name") or "").strip() and not str(item.get("name")).isdigit()
     ]
     if objects:
-        first = objects[0]
-        fields = first.get("fields") or {}
-        return {
-            "name": first.get("name") or fields.get("name"),
-            "guid": first.get("guid") or fields.get("guid"),
-            "gstin": (
-                fields.get("gstregistrationnumber")
-                or fields.get("companynumber")
-                or fields.get("gstin")
-                or fields.get("incometaxnumber")
-            ),
-            "state": fields.get("statename") or fields.get("priorstatename") or fields.get("state"),
-            "address": fields.get("address"),
-            "raw": first,
-        }
+        seen: set[str] = set()
+        companies: list[dict[str, Any]] = []
+        for item in objects:
+            company = _company_from_object(item)
+            key = (company.get("guid") or company.get("name") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            companies.append(company)
+        return companies
     root = ET.fromstring(sanitize_xml(xml_text))
     name = None
     for node in root.iter():
@@ -789,7 +802,16 @@ def parse_company_info(xml_text: str) -> dict[str, Any]:
             if text and not text.isdigit():
                 name = text
                 break
-    return {"name": name, "guid": None, "gstin": None, "state": None, "address": None, "raw_xml": xml_text}
+    if name:
+        return [{"name": name, "guid": None, "gstin": None, "state": None, "address": None, "raw_xml": xml_text}]
+    return []
+
+
+def parse_company_info(xml_text: str) -> dict[str, Any]:
+    companies = parse_companies(xml_text)
+    if companies:
+        return companies[0]
+    return {"name": None, "guid": None, "gstin": None, "state": None, "address": None, "raw_xml": xml_text}
 
 
 def voucher_type_base_map(voucher_types: list[dict[str, Any]]) -> dict[str, str]:

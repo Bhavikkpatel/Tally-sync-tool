@@ -11,6 +11,21 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class TallyXmlTests(unittest.TestCase):
+    def test_parse_companies_returns_all(self):
+        xml = """
+        <ENVELOPE><BODY><DATA><COLLECTION>
+          <COMPANY NAME="Alpha Mills"><NAME>Alpha Mills</NAME><GUID>guid-a</GUID><GSTREGISTRATIONNUMBER>29AAAAA0000A1Z5</GSTREGISTRATIONNUMBER></COMPANY>
+          <COMPANY NAME="Beta Timbers"><NAME>Beta Timbers</NAME><GUID>guid-b</GUID></COMPANY>
+          <COMPANY NAME="12"><NAME>12</NAME><GUID>guid-num</GUID></COMPANY>
+        </COLLECTION></DATA></BODY></ENVELOPE>
+        """
+        companies = tally_xml.parse_companies(xml)
+        self.assertEqual([c["name"] for c in companies], ["Alpha Mills", "Beta Timbers"])
+        self.assertEqual(companies[0]["guid"], "guid-a")
+        self.assertEqual(companies[0]["gstin"], "29AAAAA0000A1Z5")
+        info = tally_xml.parse_company_info(xml)
+        self.assertEqual(info["name"], "Alpha Mills")
+
     def test_parse_ledgers(self):
         xml = (FIXTURES / "ledger_page.xml").read_text(encoding="utf-8")
         ledgers = tally_xml.parse_objects(xml, "LEDGER")

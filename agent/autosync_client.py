@@ -117,6 +117,9 @@ class AutoSyncClient:
     def acknowledge(self, items: list[dict]) -> dict:
         return self.request("POST", "/api/integrations/tally/acknowledge", json={"items": items})
 
+    def heartbeat(self, state: str, import_failed: bool = False) -> None:
+        self.request("POST", "/api/integrations/tally/heartbeat", json={"state": state, "import_failed": import_failed}, timeout=3)
+
     def status(self) -> dict:
         return self.request("GET", "/api/integrations/tally/status")
 

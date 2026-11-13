@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ class Destination:
     id: str
     label: str
     base_url: str
+    company_guid: str = ""
+    company_name: str = ""
 
     def token_path(self, data_dir: Path) -> Path:
         return data_dir / f"destination-{self.id}.token"
@@ -60,13 +63,13 @@ def slug_from_url(url: str) -> str:
 
 def list_destinations(store: LocalStore) -> list[Destination]:
     rows = store.get_meta("destinations") or []
-    return [Destination(id=row["id"], label=row.get("label") or row["id"], base_url=row["base_url"]) for row in rows]
+    return [Destination(id=row["id"], label=row.get("label") or row["id"], base_url=row["base_url"], company_guid=row.get("company_guid", ""), company_name=row.get("company_name", "")) for row in rows]
 
 
 def save_destinations(store: LocalStore, destinations: list[Destination]) -> None:
     store.set_meta(
         "destinations",
-        [{"id": item.id, "label": item.label, "base_url": item.base_url} for item in destinations],
+        [{"id": item.id, "label": item.label, "base_url": item.base_url, "company_guid": item.company_guid, "company_name": item.company_name} for item in destinations],
     )
 
 
@@ -77,16 +80,19 @@ def get_destination(store: LocalStore, destination_id: str) -> Destination | Non
     return None
 
 
-def upsert_destination(store: LocalStore, *, label: str, base_url: str, destination_id: str | None = None) -> Destination:
+def upsert_destination(store: LocalStore, *, label: str, base_url: str, destination_id: str | None = None, company_guid: str = "", company_name: str = "") -> Destination:
     url = normalize_base_url(base_url)
     destinations = list_destinations(store)
     for existing in destinations:
-        if existing.base_url.rstrip("/").lower() == url.lower() or existing.id == destination_id:
+        if existing.base_url.lower() == url.lower() and existing.company_guid == company_guid:
             existing.label = label or existing.label
             existing.base_url = url
+            existing.company_name = company_name or existing.company_name
             save_destinations(store, destinations)
             return existing
-    item = Destination(id=destination_id or slug_from_url(url), label=label or slug_from_url(url), base_url=url)
+    key = hashlib.sha256(f"{url.lower()}:{company_guid}".encode()).hexdigest()[:16]
+    item = Destination(id=f"{slug_from_url(url)}-{key}" if company_guid else destination_id or slug_from_url(url),
+                       label=label or slug_from_url(url), base_url=url, company_guid=company_guid, company_name=company_name)
     destinations.append(item)
     save_destinations(store, destinations)
     return item

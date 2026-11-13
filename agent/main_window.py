@@ -132,34 +132,58 @@ HTML = """<!DOCTYPE html>
     color: var(--muted);
   }
 
-  .summary {
-    display: grid;
-    grid-template-columns: 1.2fr 1fr;
-    gap: 16px;
+  .home-meta {
+    margin: 0 0 16px;
+    color: var(--muted);
+    font-size: 13px;
   }
-  .summary-card {
+  .company-table-wrap {
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 10px;
-    padding: 20px 22px;
-    min-height: 140px;
+    overflow: hidden;
   }
-  .summary-card .label {
+  table.companies {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  table.companies th,
+  table.companies td {
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  table.companies th {
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--muted);
-    margin-bottom: 10px;
+    background: #f8fafc;
+    font-weight: 600;
   }
-  .summary-card .value {
-    font-size: 20px;
+  table.companies tr:last-child td { border-bottom: none; }
+  table.companies .name {
     font-weight: 650;
-    word-break: break-word;
+    color: var(--ok);
   }
-  .summary-card .meta {
-    margin-top: 10px;
+  table.companies .gstin {
     color: var(--muted);
-    font-size: 13px;
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  table.companies .sync {
+    font-weight: 600;
+  }
+  table.companies .kind {
+    color: var(--muted);
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  .empty-companies {
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--muted);
   }
   .ok { color: var(--ok); }
   .bad { color: var(--bad); }
@@ -244,18 +268,20 @@ HTML = """<!DOCTYPE html>
   <main class="content">
     <section class="view active" id="view-home">
       <h1>Home</h1>
-      <p class="lead">Summary of the current Tally connection and the last successful sync.</p>
-      <div class="summary">
-        <div class="summary-card">
-          <div class="label">Summary</div>
-          <div class="value" id="summary-title">—</div>
-          <div class="meta" id="summary-meta">—</div>
-        </div>
-        <div class="summary-card">
-          <div class="label">Last sync</div>
-          <div class="value" id="last-sync">—</div>
-          <div class="meta" id="last-sync-meta">—</div>
-        </div>
+      <p class="lead">Companies open in Tally and the last successful sync for each.</p>
+      <div class="home-meta" id="summary-meta">—</div>
+      <div class="company-table-wrap">
+        <table class="companies">
+          <thead>
+            <tr>
+              <th>Company</th>
+              <th>Last sync</th>
+            </tr>
+          </thead>
+          <tbody id="company-rows">
+            <tr><td colspan="2" class="empty-companies">Waiting for Tally…</td></tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -338,16 +364,48 @@ HTML = """<!DOCTYPE html>
     }
   }
 
+  function esc(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function renderCompanies(data) {
+    const body = document.getElementById('company-rows');
+    const companies = data.companies || [];
+    if (!data.tally_ok) {
+      body.innerHTML = '<tr><td colspan="2" class="empty-companies bad">' +
+        esc(data.tally || 'Tally offline') + '</td></tr>';
+      return;
+    }
+    if (!companies.length) {
+      body.innerHTML = '<tr><td colspan="2" class="empty-companies">No companies open in Tally</td></tr>';
+      return;
+    }
+    body.innerHTML = companies.map((company) => {
+      const gstin = company.gstin
+        ? '<div class="gstin">GSTIN ' + esc(company.gstin) + '</div>'
+        : '';
+      const kind = company.last_sync_at
+        ? '<div class="kind">' + esc(company.last_sync_kind || 'sync') + '</div>'
+        : '';
+      return '<tr>' +
+        '<td><div class="name">' + esc(company.name || '—') + '</div>' + gstin + '</td>' +
+        '<td><div class="sync">' + esc(company.last_sync_display || 'Never') + '</div>' + kind + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
   async function refresh() {
     const data = await window.pywebview.api.call('refresh', null);
     if (!data) return;
-    const summaryTitle = document.getElementById('summary-title');
-    summaryTitle.textContent = data.tally || 'Tally offline';
-    summaryTitle.className = 'value ' + (data.tally_ok ? 'ok' : 'bad');
     document.getElementById('summary-meta').textContent =
-      (data.destinations || 'no destinations') + ' · ' + (data.mapping || 'mapping needed');
-    document.getElementById('last-sync').textContent = data.last_sync_display || 'Never';
-    document.getElementById('last-sync-meta').textContent = data.last_message || data.status || '';
+      (data.tally || 'Tally') + ' · ' +
+      (data.destinations || 'no destinations') + ' · ' +
+      (data.mapping || 'mapping needed');
+    renderCompanies(data);
     document.getElementById('version').textContent = 'v' + (data.version || '');
     document.getElementById('statusbar').textContent = data.status || 'Ready';
     document.getElementById('tally_url').value = data.tally_url || '';

@@ -79,6 +79,7 @@ class SyncApp:
         self.last_message = "Starting"
         self._stop = False
         self._tray_stop = threading.Event()
+        self._import_lock = threading.Lock()
         self.window: MainWindow | None = None
         sync_log.log_event(
             f"{APP_NAME} started · v{__version__} · log={sync_log.log_path(self.config.data_dir)}",
@@ -97,7 +98,13 @@ class SyncApp:
 
     def status_text(self) -> str:
         health = self.tally.health()
-        tally_bit = health["company"] if health["ok"] else "Tally offline"
+        companies = health.get("companies") or []
+        if health["ok"] and len(companies) > 1:
+            tally_bit = f"{len(companies)} companies"
+        elif health["ok"]:
+            tally_bit = health["company"] or "Tally online"
+        else:
+            tally_bit = "Tally offline"
         dest_bit = destination_store.status_summary(self.store, self.config.data_dir)
         mapping_bit = (
             "mapped"
@@ -121,31 +128,75 @@ class SyncApp:
             return destination.client(self.config.data_dir, token)
         return AutoSyncClient(self.config.autosync_base_url)
 
-    def _finish_registration(self, destination: Destination, result: dict) -> None:
-        save_token(destination.token_path(self.config.data_dir), result["installation_token"])
-        self.store.set_meta(f"installation_id_{destination.id}", result.get("installation_id"))
-        self.store.set_meta(f"organization_id_{destination.id}", result.get("organization_id"))
-        if result.get("brand_id") is not None:
-            self.store.set_meta("brand_id", result.get("brand_id"))
-        if result.get("interval_hours"):
-            self.store.set_meta("interval_hours", result["interval_hours"])
-            self.scheduler.set_interval_hours(int(result["interval_hours"]))
-        if result.get("mapping"):
-            self.store.set_meta("ledger_mapping", result["mapping"])
-        destination_store.set_import_done(self.store, destination.id, False)
-        self.store.set_meta("initial_import_done", False)
-        self.last_message = f"Connected {destination.label}"
-        self._progress(self.last_message)
-        self._progress("Starting initial import (this can take a while)")
-        self.run_import(force=True)
+    def _choose_company(self, companies):
+        companies = [company for company in companies if company.get("guid") and company.get("name")]
+        if not companies:
+            raise RuntimeError("Open a Tally company with an ID and name first")
+        if len(companies) == 1:
+            return companies[0]
+        import tkinter as tk
+        from tkinter import simpledialog
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+            options = "\n".join(f"{i}. {company['name']}" for i, company in enumerate(companies, 1))
+            selected = simpledialog.askinteger("Choose Tally company", options, minvalue=1, maxvalue=len(companies), parent=root)
+            return companies[selected - 1] if selected is not None else None
+        finally:
+            root.destroy()
 
-    def _fixed_destination(self) -> Destination:
-        return destination_store.upsert_destination(
-            self.store,
-            label=self.destination_label,
-            base_url=self.destination_base_url,
-            destination_id=DESTINATION_ID,
-        )
+    def _finish_registration(self, company: dict, result: dict) -> None:
+        with self._import_lock:
+            list(self._company_targets())
+            destination = destination_store.upsert_destination(
+                self.store, label=company["name"], base_url=self.destination_base_url,
+                company_guid=company["guid"], company_name=company["name"],
+            )
+            save_token(destination.token_path(self.config.data_dir), result["installation_token"])
+            self.store.set_meta(f"installation_id_{destination.id}", result.get("installation_id"))
+            self.store.set_meta(f"organization_id_{destination.id}", result.get("organization_id"))
+            self.store.set_meta(f"interval_hours_{destination.id}", result.get("interval_hours") or 6)
+            self.store.set_meta(f"ledger_mapping_{destination.id}", result.get("mapping") or {})
+            self._progress(f"Connected {destination.label}")
+        self.run_import(force_destination_ids={destination.id})
+
+    def _company_targets(self):
+        """Bind old tokens to the company identified by the server, retaining their local IDs."""
+        for destination, client in self.targets():
+            if not destination.company_guid and destination_store.is_pluschwood(destination):
+                try:
+                    remote = client.status().get("installation") or {}
+                    if not remote.get("company_guid"):
+                        continue
+                    rows = destination_store.list_destinations(self.store)
+                    if any(item.id != destination.id and item.base_url == destination.base_url
+                           and item.company_guid == remote["company_guid"] for item in rows):
+                        continue
+                    for item in rows:
+                        if item.id == destination.id:
+                            item.company_guid = remote["company_guid"]
+                            item.company_name = remote.get("company_name") or ""
+                            destination = item
+                    destination_store.save_destinations(self.store, rows)
+                except Exception:
+                    continue
+            yield destination, client
+
+    def _heartbeat_loop(self):
+        while not self._tray_stop.is_set():
+            health = self.tally.health()
+            loaded = {company.get("guid") for company in health.get("companies", [])}
+            for destination, client in self.targets():
+                if not destination.company_guid or not destination_store.is_pluschwood(destination):
+                    continue
+                state = ("tally_unavailable" if not health["ok"] else
+                         "online" if destination.company_guid in loaded else "company_closed")
+                try:
+                    client.heartbeat(state, bool(self.store.get_meta(f"import_failed_{destination.id}")))
+                except Exception:
+                    continue
+            self._tray_stop.wait(30)
 
     def sign_in_connect(self) -> None:
         """Browser login registration — preferred over pairing codes."""
@@ -156,20 +207,21 @@ class SyncApp:
                 self.last_message = f"Open Tally and load the company first ({health.get('error') or 'offline'})"
                 self._progress(self.last_message)
                 return
-            company = health["detail"] or {}
+            company = self._choose_company(health["companies"])
+            if company is None:
+                return
             if not company.get("guid") or not company.get("name"):
                 self.last_message = "Tally did not return a company ID and name"
                 self._progress(self.last_message)
                 return
-            destination = self._fixed_destination()
-            client = AutoSyncClient(destination.base_url)
+            client = AutoSyncClient(self.destination_base_url)
             try:
                 session = client.create_device_session(company, agent_version="autosync-tally-agent")
             except Exception as exc:
                 text = str(exc)
                 if "404" in text:
                     raise RuntimeError(
-                        f"{destination.base_url} has no /api/integrations/tally/device-sessions yet. "
+                        f"{self.destination_base_url} has no /api/integrations/tally/device-sessions yet. "
                         "Deploy the backend with browser-login support, "
                         "or use Connection → Enter pairing code… until then."
                     ) from exc
@@ -178,9 +230,9 @@ class SyncApp:
             verify_url = session.get("verification_uri_complete") or session.get("verification_uri")
             poll_seconds = max(3, int(session.get("interval") or 5))
             sync_log.log_event(
-                f"{destination.label} · browser login started",
+                f"{company['name']} · browser login started",
                 data_dir=self.config.data_dir,
-                counts={"user_code": user_code, "poll_seconds": poll_seconds},
+                counts={"poll_seconds": poll_seconds},
             )
             self._progress(f"Open browser and approve user code {user_code}")
             if verify_url:
@@ -192,16 +244,16 @@ class SyncApp:
                 result = client.poll_device_token(device_code)
                 if result:
                     break
-                self.last_message = f"Waiting for browser approval ({user_code})"
+                self.last_message = "Waiting for browser approval"
                 time.sleep(poll_seconds)
             if not result:
                 raise RuntimeError("Browser approval timed out or was not completed")
             sync_log.log_event(
-                f"{destination.label} · browser login approved",
+                f"{company['name']} · browser login approved",
                 data_dir=self.config.data_dir,
                 counts={"installation_id": result.get("installation_id"), "organization_id": result.get("organization_id")},
             )
-            self._finish_registration(destination, result)
+            self._finish_registration(company, result)
         except Exception as exc:
             self.last_message = f"Sign-in failed: {exc}"
             self._progress(self.last_message)
@@ -221,55 +273,52 @@ class SyncApp:
                 self._progress(self.last_message)
                 return
             self._progress(f"Tally company: {health.get('company') or '(loaded)'}")
-            destination = self._fixed_destination()
-            brand_id = self.store.get_meta("brand_id")
-            client = AutoSyncClient(destination.base_url)
+            company = self._choose_company(health["companies"])
+            if company is None:
+                return
+            client = AutoSyncClient(self.destination_base_url)
             self._progress(f"Calling {client.base_url}/api/integrations/tally/pair")
             result = client.pair(
                 code,
-                health["detail"],
+                company,
                 int(self.store.get_meta("interval_hours", self.config.default_interval_hours) or 6),
-                brand_id=brand_id,
             )
-            self._finish_registration(destination, result)
+            self._finish_registration(company, result)
         except Exception as exc:
             self.last_message = f"Pair failed: {exc}"
             self._progress(self.last_message)
             traceback.print_exc()
 
     def run_import(self, force: bool = False, force_destination_ids: set[str] | None = None) -> None:
-        targets = self.targets()
+        with self._import_lock:
+            targets = list(self._company_targets())
+            forced = set(force_destination_ids or ())
+            if force and targets:
+                companies = [{"guid": item.id, "name": item.company_name or item.label} for item, _ in targets]
+                choice = self._choose_company(companies)
+                if not choice:
+                    return
+                forced.add(choice["guid"])
+            if forced:
+                targets = [(item, client) for item, client in targets if item.id in forced]
+            self._import_companies(targets, forced)
+
+    def _import_companies(self, targets, forced, *, incremental=False, companies=None):
         if not targets:
-            self.last_message = "Pair a destination first"
             return
         self.config.import_from_date = self.store.get_meta("import_from_date", self.config.import_from_date)
         self.config.import_to_date = self.store.get_meta("import_to_date", self.config.import_to_date)
-        forced = set(force_destination_ids or ())
-        if force:
-            forced.update(destination.id for destination, _token in self.paired())
-        try:
-            range_bit = ""
-            if self.config.import_from_date or self.config.import_to_date:
-                range_bit = f" ({self.config.import_from_date or '…'} → {self.config.import_to_date or '…'})"
-            self.last_message = f"Importing from Tally{range_bit}"
-            self._progress(self.last_message)
-            summary = ImportRunner(
-                self.store,
-                self.tally,
-                targets,
-                self.config,
-                self._progress,
-                force_destination_ids=forced,
-            ).run(force=False)
-            self._mark_synced("import")
-            self.last_message = f"Import complete: {summary.get('destinations') or summary}"
-            self._progress(self.last_message)
-            if not OutboundRunner(self.store, self.tally, self._primary_client()).mapping_ready():
-                self.configure_mapping()
-        except Exception as exc:
-            self.last_message = f"Import failed: {exc}"
-            self._progress(self.last_message)
-            traceback.print_exc()
+        summary = ImportRunner(self.store, self.tally, targets, self.config, self._progress,
+                               force_destination_ids=forced).run(incremental=incremental, companies=companies)
+        by_company = summary.get("destinations", {})
+        for item, _ in targets:
+            result = by_company.get(item.id)
+            if result:
+                self.store.set_meta(f"import_failed_{item.id}", bool(result.get("error")))
+            if result and not result.get("error"):
+                self.store.set_meta(f"last_import_{item.id}", time.time())
+                self._mark_synced("import", {"guid": item.company_guid, "name": item.company_name})
+        self._progress(f"Import results: {by_company or summary}")
 
     def configure_mapping(self) -> None:
         if not self.paired():
@@ -292,7 +341,7 @@ class SyncApp:
     def sync_now(self) -> None:
         try:
             sync_log.log_event("Sync now started", data_dir=self.config.data_dir)
-            self.scheduled_tick()
+            self.scheduled_tick(force_due=True)
             self._mark_synced("sync")
             if not self.last_message.startswith("["):
                 self.last_message = "Synced"
@@ -301,7 +350,34 @@ class SyncApp:
             sync_log.log_event(f"Sync failed: {exc}", data_dir=self.config.data_dir)
             traceback.print_exc()
 
-    def scheduled_tick(self) -> None:
+    def scheduled_tick(self, force_due=False) -> None:
+        if PRODUCT_ID != "pluschwood":
+            self._legacy_scheduled_tick()
+            return
+        with self._import_lock:
+            health = self.tally.health()
+            if not health["ok"]:
+                return
+            loaded = {company.get("guid") for company in health["companies"]}
+            due, forced = [], set()
+            for destination, client in self._company_targets():
+                if destination.company_guid not in loaded:
+                    continue
+                try:
+                    remote = client.status().get("installation") or {}
+                except Exception:
+                    continue
+                if remote.get("company_guid") != destination.company_guid:
+                    continue
+                hours = remote.get("interval_hours") or 6
+                last = self.store.get_meta(f"last_import_{destination.id}", 0) or 0
+                if not remote.get("import_complete", True) and destination_store.import_done(self.store, destination.id):
+                    forced.add(destination.id)
+                if force_due or destination.id in forced or time.time() - last >= hours * 3600:
+                    due.append((destination, client))
+            self._import_companies(due, forced, incremental=True, companies=health["companies"])
+
+    def _legacy_scheduled_tick(self) -> None:
         health = self.tally.health()
         if not health["ok"]:
             raise RuntimeError(health.get("error") or "Tally offline")
@@ -373,19 +449,75 @@ class SyncApp:
             return
         self.last_message = sync_log.log_event(message, data_dir=self.config.data_dir)
 
-    def _mark_synced(self, kind: str = "sync") -> None:
+    def _company_sync_key(self, company: dict | None) -> str | None:
+        if not company:
+            return None
+        guid = (company.get("guid") or "").strip()
+        if guid:
+            return f"guid:{guid}"
+        name = (company.get("name") or "").strip()
+        if name:
+            return f"name:{name.lower()}"
+        return None
+
+    def _mark_synced(self, kind: str = "sync", company: dict | None = None) -> None:
         stamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         self.store.set_meta("last_sync_at", stamp)
         self.store.set_meta("last_sync_kind", kind)
+        key = self._company_sync_key(company)
+        if not key and self.tally:
+            try:
+                key = self._company_sync_key(self.tally.company_info())
+            except Exception:
+                key = None
+        if key:
+            self.store.set_meta(f"last_sync_at_{key}", stamp)
+            self.store.set_meta(f"last_sync_kind_{key}", kind)
+
+    def _company_last_sync(self, company: dict) -> tuple[str, str]:
+        key = self._company_sync_key(company)
+        if not key:
+            return "", "sync"
+        stamp = self.store.get_meta(f"last_sync_at_{key}") or ""
+        kind = self.store.get_meta(f"last_sync_kind_{key}") or "sync"
+        # Migrate legacy single last_sync onto the first known company once.
+        if not stamp:
+            legacy = self.store.get_meta("last_sync_at") or ""
+            if legacy and not self.store.get_meta("last_sync_migrated"):
+                stamp = legacy
+                kind = self.store.get_meta("last_sync_kind") or "sync"
+                self.store.set_meta(f"last_sync_at_{key}", stamp)
+                self.store.set_meta(f"last_sync_kind_{key}", kind)
+                self.store.set_meta("last_sync_migrated", True)
+        return stamp, kind
 
     def status_detail(self) -> dict:
         health = self.tally.health()
         last_sync = self.store.get_meta("last_sync_at") or ""
         last_kind = self.store.get_meta("last_sync_kind") or "sync"
+        companies_out: list[dict] = []
+        for company in health.get("companies") or []:
+            stamp, kind = self._company_last_sync(company)
+            companies_out.append(
+                {
+                    "name": company.get("name") or "—",
+                    "guid": company.get("guid") or "",
+                    "gstin": company.get("gstin") or "",
+                    "last_sync_at": stamp,
+                    "last_sync_display": stamp or "Never",
+                    "last_sync_kind": kind,
+                }
+            )
+        tally_label = (
+            f"{len(companies_out)} companies"
+            if len(companies_out) > 1
+            else (health.get("company") if health.get("ok") else (health.get("error") or "offline"))
+        )
         return {
             "version": __version__,
-            "tally": health.get("company") if health.get("ok") else (health.get("error") or "offline"),
+            "tally": tally_label,
             "tally_ok": bool(health.get("ok")),
+            "companies": companies_out,
             "destinations": destination_store.status_summary(self.store, self.config.data_dir),
             "mapping": (
                 "mapped"
@@ -474,8 +606,21 @@ class SyncApp:
             except Exception:
                 pass
 
+    def _company_scheduler_loop(self):
+        while not self._tray_stop.is_set():
+            try:
+                self.scheduled_tick()
+            except Exception as exc:
+                self._progress(f"Sync check failed: {exc}")
+            self._tray_stop.wait(30)
+
     def run(self) -> None:
-        self.scheduler.start()
+        if PRODUCT_ID == "pluschwood":
+            # Check per-company due times and re-import requests on each scheduler tick.
+            threading.Thread(target=self._heartbeat_loop, name="tally-heartbeat", daemon=True).start()
+            threading.Thread(target=self._company_scheduler_loop, name="tally-company-sync", daemon=True).start()
+        else:
+            self.scheduler.start()
         controller = AppController(
             get_status=self.status_text,
             get_detail=self.status_detail,
