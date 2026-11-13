@@ -14,6 +14,11 @@ if not exe_name:
 product_file = root / "PRODUCT"
 product_file.write_text(product + "\n", encoding="utf-8")
 
+version_info = root / "packaging" / f"version_info_{product}.txt"
+version_arg = str(version_info) if version_info.exists() else None
+icon_path = root / "packaging" / "tally_sync.ico"
+icon_arg = str(icon_path) if icon_path.exists() else None
+
 a = Analysis(
     [str(root / "packaging" / "run_app.py")],
     pathex=[str(root)],
@@ -42,14 +47,16 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX packing triggers many Defender Trojan heuristics — never enable for release builds.
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(root / "packaging" / "tally_sync.ico") if (root / "packaging" / "tally_sync.ico").exists() else None,
+    icon=icon_arg,
+    version=version_arg,
 )
 coll = COLLECT(
     exe,
@@ -57,7 +64,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name=exe_name,
 )

@@ -20,11 +20,24 @@ jobs:
         run: |
           python -m pip install -r requirements.txt pyinstaller
           choco install innosetup -y
+      - name: Import code-signing certificate
+        if: ${{ secrets.SIGN_CERT_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          SIGN_CERT_PFX_BASE64: ${{ secrets.SIGN_CERT_PFX_BASE64 }}
+          SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
+        run: |
+          $bytes = [Convert]::FromBase64String($env:SIGN_CERT_PFX_BASE64)
+          $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($pfx, $bytes)
+          echo "SIGN_CERT_PFX=$pfx" >> $env:GITHUB_ENV
+          echo "SIGN_CERT_PASSWORD=$env:SIGN_CERT_PASSWORD" >> $env:GITHUB_ENV
       - name: Build both products
         shell: pwsh
         run: |
           python packaging\make_icon.py
-          .\packaging\build.ps1 -Product both
+          $sign = if ($env:SIGN_CERT_PFX) { "-Sign" } else { "" }
+          Invoke-Expression ".\packaging\build.ps1 -Product both $sign"
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:

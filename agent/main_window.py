@@ -487,7 +487,7 @@ HTML = """<!DOCTYPE html>
     if (!visible.length) {
       el.innerHTML = '<span class="empty">Waiting for sync activity…</span>';
     } else {
-      el.textContent = visible.join('\n');
+      el.textContent = visible.join('\\n');
     }
     hint.textContent = (data.log_path ? data.log_path : 'sync.log') + ' · ' + lines.length + ' lines';
     if (stick) el.scrollTop = el.scrollHeight;

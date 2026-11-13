@@ -83,6 +83,29 @@ Outputs:
 
 Bump `VERSION`, push a `v*` tag, and let the release workflow publish both Setup EXEs. **Check for updates** picks the installer for the current product.
 
+### Why Defender / SmartScreen flags the Setup EXE
+
+Unsigned PyInstaller + Inno installers are often heuristic-detected as Trojans. Release builds now:
+
+- disable UPX packing (a common AV trigger)
+- embed proper Windows version/company metadata
+- support Authenticode signing when a certificate is available
+
+**Proper fix:** sign with an OV or EV code-signing certificate (or [Azure Trusted Signing](https://learn.microsoft.com/windows/msix/package/trusted-signing-overview)).
+
+```powershell
+$env:SIGN_CERT_PFX = "C:\certs\codesign.pfx"
+$env:SIGN_CERT_PASSWORD = "..."
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Product both -Sign
+```
+
+For GitHub Releases, add repository secrets:
+
+- `SIGN_CERT_PFX_BASE64` — base64 of the `.pfx`
+- `SIGN_CERT_PASSWORD` — PFX password
+
+Until a cert is configured, Windows may still warn; users can allow the file after verifying it came from your release page.
+
 ## App + tray
 
 - Main window: home summary + last sync; Connection / Settings / Help menus

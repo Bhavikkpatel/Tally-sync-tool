@@ -17,18 +17,14 @@
   #define MyAppExeName "AutoSyncTallySync.exe"
   #define MyInstallDir "AutoSyncTallySync"
   #define MySetupBase "AutoSyncTallySyncSetup"
+  #define MyAppPublisher "AutoSync"
+  #define MyAppURL "https://autosync.app"
 #else
   #define MyAppName "Pluschwood Tally Sync"
   #define MyAppId "{{8F3C2A71-9B44-4D1E-9C5A-A1B2C3D4E5F6}"
   #define MyAppExeName "PluschwoodTallySync.exe"
   #define MyInstallDir "PluschwoodTallySync"
   #define MySetupBase "PluschwoodTallySyncSetup"
-#endif
-
-#if Product == "autosync"
-  #define MyAppPublisher "AutoSync"
-  #define MyAppURL "https://autosync.app"
-#else
   #define MyAppPublisher "Pluschwood"
   #define MyAppURL "https://console.pluschwood.com"
 #endif
@@ -37,23 +33,35 @@
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
+VersionInfoVersion={#MyAppVersion}.0
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Setup
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoCopyright=Copyright (C) {#MyAppPublisher}
 DefaultDirName={autopf}\{#MyInstallDir}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 LicenseFile=
 OutputDir=output
 OutputBaseFilename={#MySetupBase}-{#MyAppVersion}
-SetupIconFile=
+SetupIconFile=tally_sync.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Sign installer when SIGNTOOL is configured by the build (optional).
+#if GetEnv("TALLY_SYNC_SIGN") == "1"
+SignTool=tallysync
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
