@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 import traceback
 import webbrowser
@@ -22,7 +23,7 @@ from agent.mapping_dialog import ask_destination_login, ask_destination_pair, as
 from agent.outbound_runner import OutboundRunner
 from agent.scheduler import IntervalScheduler
 from agent.security import load_token, save_token
-from agent.settings_ui import SettingsController, open_settings
+from agent.main_window import AppController, MainWindow
 from agent.storage import LocalStore
 from agent.tally_client import TallyClient
 from agent.tray import open_sync_log, run_tray
@@ -66,6 +67,8 @@ class SyncApp:
         self.scheduler = IntervalScheduler(interval, self.scheduled_tick, self.config.poll_seconds)
         self.last_message = "Starting"
         self._stop = False
+        self._tray_stop = threading.Event()
+        self.window: MainWindow | None = None
         sync_log.log_event(
             f"{APP_NAME} started · v{__version__} · log={sync_log.log_path(self.config.data_dir)}",
             data_dir=self.config.data_dir,
@@ -409,20 +412,8 @@ class SyncApp:
         )
 
     def open_ui(self) -> None:
-        open_settings(
-            SettingsController(
-                get_status=self.status_text,
-                get_detail=self.status_detail,
-                save_settings=self.save_settings,
-                on_sign_in=self.sign_in_connect,
-                on_pair=self.pair,
-                on_import=lambda: self.run_import(force=True),
-                on_sync_now=self.sync_now,
-                on_mapping=self.configure_mapping,
-                on_open_log=open_sync_log,
-                on_check_update=self.check_update_info,
-            )
-        )
+        if self.window is not None:
+            self.window.show()
 
     def check_update_info(self) -> dict:
         info = check_for_update()
@@ -458,33 +449,56 @@ class SyncApp:
 
     def quit(self) -> None:
         self._stop = True
+        self._tray_stop.set()
         self.scheduler.stop()
+        if self.window is not None:
+            try:
+                self.window.root.after(0, self.window.quit_app)
+            except Exception:
+                pass
 
     def run(self) -> None:
         self.scheduler.start()
-        # Open settings once so first-run users see the UI; tray remains the long-running host.
-        self.open_ui()
+        controller = AppController(
+            get_status=self.status_text,
+            get_detail=self.status_detail,
+            save_settings=self.save_settings,
+            on_sign_in=self.sign_in_connect,
+            on_pair=self.pair,
+            on_import=lambda: self.run_import(force=True),
+            on_sync_now=self.sync_now,
+            on_mapping=self.configure_mapping,
+            on_open_log=open_sync_log,
+            on_check_update=self.check_update_info,
+            on_quit=self._quit_from_ui,
+        )
+        self.window = MainWindow(controller)
+
         if sys.platform.startswith("win"):
-            run_tray(
-                get_status=self.status_text,
-                on_open_ui=self.open_ui,
-                on_sign_in=self.sign_in_connect,
-                on_pair=self.pair,
-                on_import=lambda: self.run_import(force=True),
-                on_sync_now=self.sync_now,
-                on_mapping=self.configure_mapping,
-                on_check_update=self.check_update_tray,
-                on_quit=self.quit,
-            )
-        else:
-            print(self.status_text())
-            print("Tray UI is Windows-only. Settings window is available; use prompts for pairing.")
-            while not self._stop:
-                try:
-                    self.scheduler._safe_tick()
-                except Exception:
-                    pass
-                time.sleep(self.config.poll_seconds)
+            threading.Thread(
+                target=run_tray,
+                kwargs={
+                    "get_status": self.status_text,
+                    "on_open_ui": self.open_ui,
+                    "on_quit": self._quit_from_ui,
+                    "stop_event": self._tray_stop,
+                },
+                daemon=True,
+            ).start()
+
+        # Main Windows application loop (not tray-first).
+        self.window.run()
+
+    def _quit_from_ui(self) -> None:
+        self._stop = True
+        self._tray_stop.set()
+        self.scheduler.stop()
+        if self.window is not None:
+            try:
+                self.window.root.quit()
+            except Exception:
+                pass
+
 
 
 def main() -> None:

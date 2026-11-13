@@ -10,7 +10,6 @@ from PIL import Image, ImageDraw
 from agent import sync_log
 from agent.version import APP_NAME
 
-# Windows NOTIFYICONDATAW.szTip max length (pystray raises ValueError above this).
 WIN_TIP_MAX = 128
 
 
@@ -47,17 +46,13 @@ def run_tray(
     *,
     get_status: Callable[[], str],
     on_open_ui: Callable[[], None],
-    on_sign_in: Callable[[], None],
-    on_pair: Callable[[], None],
-    on_import: Callable[[], None],
-    on_sync_now: Callable[[], None],
-    on_mapping: Callable[[], None],
-    on_check_update: Callable[[], None],
     on_quit: Callable[[], None],
+    stop_event: threading.Event | None = None,
 ) -> None:
+    """Background tray companion for the main window app."""
     import pystray
 
-    stop = threading.Event()
+    stop = stop_event or threading.Event()
 
     def spawn(action: Callable[[], None]):
         return lambda icon, item: threading.Thread(target=action, daemon=True).start()
@@ -68,14 +63,8 @@ def run_tray(
     menu = pystray.Menu(
         pystray.MenuItem(menu_status, None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Open settings…", spawn(on_open_ui), default=True),
-        pystray.MenuItem("Sign in to connect…", spawn(on_sign_in)),
-        pystray.MenuItem("Enter pairing code…", spawn(on_pair)),
-        pystray.MenuItem("Run initial import", spawn(on_import)),
-        pystray.MenuItem("Sync now", spawn(on_sync_now)),
-        pystray.MenuItem("Ledger mapping…", spawn(on_mapping)),
+        pystray.MenuItem("Open window", spawn(on_open_ui), default=True),
         pystray.MenuItem("Open sync log", spawn(open_sync_log)),
-        pystray.MenuItem("Check for updates…", spawn(on_check_update)),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
             "Quit",
@@ -85,7 +74,7 @@ def run_tray(
     icon = pystray.Icon(APP_NAME.replace(" ", ""), make_icon(False), _clip(APP_NAME), menu)
 
     def refresh_loop() -> None:
-        while not stop.wait(15):
+        while not stop.wait(10):
             try:
                 text = get_status()
                 icon.title = _clip(f"{APP_NAME} — {text}", WIN_TIP_MAX)

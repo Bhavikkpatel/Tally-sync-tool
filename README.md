@@ -2,7 +2,8 @@
 
 Windows tray application that syncs an open TallyPrime company with **Pluschwood Console** or **AutoSync**.
 
-- System tray status + **Open settings** UI for configuration
+- **Windows application window** (dashboard, connection, settings) with menu bar
+- System tray companion: close window hides to tray; **Open window** restores it
 - Browser sign-in to register the tool with your org (pairing codes as fallback)
 - Rich Pluschwood import payload (`pluschwood_tally_v2`)
 - Check for updates from [GitHub Releases](https://github.com/Bhavikkpatel/Tally-sync-tool/releases)
@@ -62,13 +63,12 @@ Outputs:
 
 Bump `VERSION` before tagging a release. Publish the Setup EXE as a GitHub Release asset so **Check for updates** can find it.
 
-## Tray menu
+## App + tray
 
-- Open settings…
-- Sign in to connect… / Enter pairing code…
-- Run initial import / Sync now / Ledger mapping…
-- Open sync log / Check for updates…
-- Quit
+- Main window: status cards, connection actions, settings, Help → Check for updates
+- Close / Hide to tray: keeps syncing in the background
+- Tray: Open window · Open sync log · Quit
+- Full Quit: File → Quit or tray → Quit
 
 ## Docs
 
