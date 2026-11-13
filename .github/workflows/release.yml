@@ -21,23 +21,31 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
           choco install innosetup -y
       - name: Import code-signing certificate
-        if: ${{ secrets.SIGN_CERT_PFX_BASE64 != '' }}
         shell: pwsh
         env:
           SIGN_CERT_PFX_BASE64: ${{ secrets.SIGN_CERT_PFX_BASE64 }}
           SIGN_CERT_PASSWORD: ${{ secrets.SIGN_CERT_PASSWORD }}
         run: |
+          if (-not $env:SIGN_CERT_PFX_BASE64) {
+            Write-Host "No SIGN_CERT_PFX_BASE64 secret — building unsigned (Defender may still warn)."
+            exit 0
+          }
           $bytes = [Convert]::FromBase64String($env:SIGN_CERT_PFX_BASE64)
           $pfx = Join-Path $env:RUNNER_TEMP "codesign.pfx"
           [IO.File]::WriteAllBytes($pfx, $bytes)
-          echo "SIGN_CERT_PFX=$pfx" >> $env:GITHUB_ENV
-          echo "SIGN_CERT_PASSWORD=$env:SIGN_CERT_PASSWORD" >> $env:GITHUB_ENV
+          "SIGN_CERT_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:SIGN_CERT_PASSWORD) {
+            "SIGN_CERT_PASSWORD=$($env:SIGN_CERT_PASSWORD)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
       - name: Build both products
         shell: pwsh
         run: |
           python packaging\make_icon.py
-          $sign = if ($env:SIGN_CERT_PFX) { "-Sign" } else { "" }
-          Invoke-Expression ".\packaging\build.ps1 -Product both $sign"
+          if ($env:SIGN_CERT_PFX) {
+            .\packaging\build.ps1 -Product both -Sign
+          } else {
+            .\packaging\build.ps1 -Product both
+          }
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
