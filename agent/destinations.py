@@ -108,11 +108,13 @@ def migrate_legacy_destination(store: LocalStore, data_dir: Path, legacy_url: st
     token = load_token(legacy_token_path)
     if not token:
         return
+    from agent.product import DESTINATION_ID, DESTINATION_LABEL
+
     destination = upsert_destination(
         store,
-        label="AutoSync",
+        label=DESTINATION_LABEL,
         base_url=legacy_url,
-        destination_id="legacy-autosync",
+        destination_id=DESTINATION_ID,
     )
     save_token(destination.token_path(data_dir), token)
     if store.get_meta("initial_import_done"):

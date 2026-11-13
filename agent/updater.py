@@ -6,7 +6,12 @@ from typing import Any
 
 import httpx
 
-from agent.version import GITHUB_RELEASES_API, GITHUB_RELEASES_URL, __version__
+from agent.product import PRODUCT_ID
+from agent.version import __version__
+
+# Private update feed (not shown in the UI).
+_UPDATE_REPO = "Bhavikkpatel/Tally-sync-tool"
+_UPDATE_API = f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest"
 
 
 @dataclass
@@ -46,6 +51,15 @@ def _pick_installer_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None
             preferred.append(asset)
     if not preferred:
         return None
+    product_token = PRODUCT_ID.lower()
+    for asset in preferred:
+        name = str(asset.get("name") or "").lower()
+        if product_token in name and ("setup" in name or "installer" in name):
+            return asset
+    for asset in preferred:
+        name = str(asset.get("name") or "").lower()
+        if product_token in name:
+            return asset
     for asset in preferred:
         name = str(asset.get("name") or "").lower()
         if "setup" in name or "installer" in name:
@@ -57,7 +71,7 @@ def check_for_update(timeout: float = 20.0) -> UpdateInfo:
     current = __version__
     try:
         response = httpx.get(
-            GITHUB_RELEASES_API,
+            _UPDATE_API,
             headers={"Accept": "application/vnd.github+json", "User-Agent": f"TallySync/{current}"},
             timeout=timeout,
             follow_redirects=True,
@@ -67,40 +81,41 @@ def check_for_update(timeout: float = 20.0) -> UpdateInfo:
             current_version=current,
             latest_version=current,
             update_available=False,
-            release_url=GITHUB_RELEASES_URL,
+            release_url="",
             release_notes="",
-            message=f"Could not reach GitHub: {exc}",
+            message=f"Could not check for updates: {exc}",
         )
     if response.status_code == 404:
         return UpdateInfo(
             current_version=current,
             latest_version=current,
             update_available=False,
-            release_url=GITHUB_RELEASES_URL,
+            release_url="",
             release_notes="",
-            message="No GitHub releases published yet.",
+            message="No updates published yet.",
         )
     if response.status_code >= 400:
         return UpdateInfo(
             current_version=current,
             latest_version=current,
             update_available=False,
-            release_url=GITHUB_RELEASES_URL,
+            release_url="",
             release_notes="",
-            message=f"GitHub returned HTTP {response.status_code}",
+            message=f"Update check failed (HTTP {response.status_code})",
         )
     payload = response.json()
     tag = str(payload.get("tag_name") or payload.get("name") or "").strip()
     latest = tag.lstrip("vV") or current
     asset = _pick_installer_asset(payload.get("assets") or [])
     available = is_newer(latest, current)
+    asset_url = (asset or {}).get("browser_download_url") or ""
     return UpdateInfo(
         current_version=current,
         latest_version=latest,
         update_available=available,
-        release_url=str(payload.get("html_url") or GITHUB_RELEASES_URL),
+        release_url=asset_url or str(payload.get("html_url") or ""),
         release_notes=str(payload.get("body") or "").strip(),
         asset_name=(asset or {}).get("name"),
-        asset_url=(asset or {}).get("browser_download_url"),
+        asset_url=asset_url or None,
         message=("Update available" if available else "You are on the latest version"),
     )

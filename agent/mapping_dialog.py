@@ -27,9 +27,49 @@ def ask_ledger_mapping(existing: dict | None = None, on_save: Callable[[dict], N
     return result
 
 
-def ask_pairing_code() -> str | None:
-    result = ask_destination_pair()
-    return result["code"] if result else None
+def ask_pairing_code(title: str = "Enter pairing code") -> str | None:
+    """Ask only for a pairing code (destination is fixed by the product build)."""
+    for asker in (_tk_pairing_code, _windows_pairing_code, _console_pairing_code):
+        try:
+            result = asker(title)
+        except Exception:
+            result = None
+        if result is None:
+            continue
+        code = (result or "").strip()
+        return code or None
+    return None
+
+
+def _tk_pairing_code(title: str) -> str | None:
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+    except Exception:
+        return None
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    try:
+        value = simpledialog.askstring(title, "Pairing code:", parent=root)
+    finally:
+        root.destroy()
+    return value
+
+
+def _windows_pairing_code(title: str) -> str | None:
+    return _windows_input("Pairing code", title, "")
+
+
+def _console_pairing_code(title: str) -> str | None:
+    print(title)
+    try:
+        return input("Pairing code: ").strip()
+    except EOFError:
+        return None
 
 
 def ask_destination_pair(presets: list[dict] | None = None) -> dict | None:

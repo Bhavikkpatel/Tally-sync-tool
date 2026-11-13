@@ -6,17 +6,27 @@ from pathlib import Path
 
 
 def default_data_dir() -> Path:
+    from agent.product import DATA_DIR_NAME
+
     root = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    path = Path(root) / "AutoSyncTallySync"
+    path = Path(root) / DATA_DIR_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
+def _default_product_base_url() -> str:
+    from agent.product import DESTINATION_BASE_URL, PRODUCT_ID
+
+    if PRODUCT_ID == "autosync" and os.environ.get("AUTOSYNC_BASE_URL"):
+        return os.environ["AUTOSYNC_BASE_URL"].rstrip("/")
+    if PRODUCT_ID == "pluschwood" and os.environ.get("PLUSCHWOOD_BASE_URL"):
+        return os.environ["PLUSCHWOOD_BASE_URL"].rstrip("/")
+    return DESTINATION_BASE_URL
+
+
 @dataclass
 class AgentConfig:
-    autosync_base_url: str = field(
-        default_factory=lambda: os.environ.get("AUTOSYNC_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
-    )
+    autosync_base_url: str = field(default_factory=_default_product_base_url)
     tally_url: str = field(
         default_factory=lambda: os.environ.get("TALLY_URL", "http://127.0.0.1:9000").rstrip("/")
     )

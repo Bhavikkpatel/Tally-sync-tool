@@ -1,18 +1,31 @@
-# Register the Tally sync agent to start at Windows logon for the current user.
-$project = Split-Path -Parent $PSScriptRoot
-$python = (Get-Command python -ErrorAction SilentlyContinue)?.Source
-if (-not $python) {
-    Write-Error "Python was not found on PATH."
-    exit 1
+# Register the selected product for Windows startup (current user).
+param(
+    [ValidateSet("pluschwood", "autosync")]
+    [string]$Product = "pluschwood"
+)
+
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent $PSScriptRoot
+
+$exeName = if ($Product -eq "pluschwood") { "PluschwoodTallySync" } else { "AutoSyncTallySync" }
+$appName = if ($Product -eq "pluschwood") { "Pluschwood Tally Sync" } else { "AutoSync Tally Sync" }
+
+$candidates = @(
+    (Join-Path $root "dist\$exeName\$exeName.exe"),
+    (Join-Path ${env:ProgramFiles} "$exeName\$exeName.exe"),
+    (Join-Path ${env:LOCALAPPDATA} "Programs\$exeName\$exeName.exe")
+)
+$target = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $target) {
+    throw "Could not find $exeName.exe. Build or install the app first."
 }
+
 $startup = [Environment]::GetFolderPath("Startup")
-$shortcutPath = Join-Path $startup "AutoSync Tally Sync.lnk"
+$shortcutPath = Join-Path $startup "$appName.lnk"
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $python
-$shortcut.Arguments = "-m agent"
-$shortcut.WorkingDirectory = $project
-$shortcut.WindowStyle = 7
-$shortcut.Description = "AutoSync Tally Sync Agent"
+$shortcut.TargetPath = $target
+$shortcut.WorkingDirectory = Split-Path $target
+$shortcut.Description = $appName
 $shortcut.Save()
-Write-Output "Created $shortcutPath"
+Write-Host "Startup shortcut: $shortcutPath -> $target"

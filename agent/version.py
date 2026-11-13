@@ -3,12 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-APP_NAME = "Tally Sync"
-APP_ID = "TallySync"
-GITHUB_REPO = "Bhavikkpatel/Tally-sync-tool"
-GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-GITHUB_REPO_URL = f"https://github.com/{GITHUB_REPO}"
-GITHUB_RELEASES_URL = f"{GITHUB_REPO_URL}/releases"
+from agent.product import APP_ID, APP_NAME, DESTINATION_BASE_URL, DESTINATION_LABEL
 
 
 def _read_version_file() -> str:
@@ -30,3 +25,11 @@ def _read_version_file() -> str:
 
 
 __version__ = _read_version_file()
+
+__all__ = [
+    "APP_NAME",
+    "APP_ID",
+    "DESTINATION_LABEL",
+    "DESTINATION_BASE_URL",
+    "__version__",
+]

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import threading
-import webbrowser
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from agent.version import APP_NAME, GITHUB_RELEASES_URL, GITHUB_REPO_URL, __version__
+from agent.version import APP_NAME, __version__
 
 
 @dataclass
@@ -27,7 +26,7 @@ HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Tally Sync</title>
+<title>__APP_NAME__</title>
 <style>
   :root {
     --bg: #f0f2f5;
@@ -238,13 +237,6 @@ HTML = """<!DOCTYPE html>
         <button type="button" data-action="update">Check for updates…</button>
       </div>
     </div>
-    <div class="menu" data-menu="help">
-      <button type="button">Help</button>
-      <div class="dropdown">
-        <button type="button" data-action="github">GitHub repository</button>
-        <button type="button" data-action="releases">Releases</button>
-      </div>
-    </div>
     <div class="spacer"></div>
     <div class="version" id="version"></div>
   </nav>
@@ -418,21 +410,19 @@ class _Api:
             fn, message = actions[name]
             threading.Thread(target=fn, daemon=True).start()
             return {"message": message}
-        if name == "github":
-            webbrowser.open(GITHUB_REPO_URL)
-            return {"message": "Opened GitHub"}
-        if name == "releases":
-            webbrowser.open(GITHUB_RELEASES_URL)
-            return {"message": "Opened releases"}
         if name == "update":
             info = self.controller.on_check_update()
             result: dict[str, Any] = {
                 "message": info.get("message") or "Update check complete",
                 "alert": info.get("message") or "Update check complete",
             }
-            if info.get("update_available") and info.get("release_url"):
-                result["open_url"] = info["release_url"]
-                result["alert"] = f"Update available: v{info.get('latest_version')}. Opening release page."
+            download = info.get("asset_url") or info.get("release_url")
+            if info.get("update_available") and download:
+                result["open_url"] = download
+                result["alert"] = (
+                    f"Update available: v{info.get('latest_version')}. "
+                    "Opening the installer download."
+                )
             return result
         return {"message": f"Unknown action: {name}"}
 
@@ -477,7 +467,7 @@ class MainWindow:
 
         self._window = webview.create_window(
             APP_NAME,
-            html=HTML,
+            html=HTML.replace("__APP_NAME__", APP_NAME),
             js_api=self._api,
             width=920,
             height=640,

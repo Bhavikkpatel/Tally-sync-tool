@@ -17,10 +17,17 @@ from agent import destinations as destination_store
 from agent import sync_log
 from agent.autosync_client import AutoSyncClient
 from agent.config import AgentConfig
-from agent.destinations import PRESETS, Destination
+from agent.destinations import Destination
 from agent.import_runner import ImportRunner
-from agent.mapping_dialog import ask_destination_login, ask_destination_pair, ask_ledger_mapping
+from agent.mapping_dialog import ask_ledger_mapping, ask_pairing_code
 from agent.outbound_runner import OutboundRunner
+from agent.product import (
+    APP_NAME,
+    DESTINATION_BASE_URL,
+    DESTINATION_ID,
+    DESTINATION_LABEL,
+    PRODUCT_ID,
+)
 from agent.scheduler import IntervalScheduler
 from agent.security import load_token, save_token
 from datetime import datetime, timedelta, timezone
@@ -30,26 +37,26 @@ from agent.storage import LocalStore
 from agent.tally_client import TallyClient
 from agent.tray import open_sync_log, run_tray
 from agent.updater import check_for_update
-from agent.version import APP_NAME, __version__
+from agent.version import __version__
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _product_base_url() -> str:
+    """Hardcoded product URL, with optional env override for local testing."""
+    if PRODUCT_ID == "autosync" and os.environ.get("AUTOSYNC_BASE_URL"):
+        return os.environ["AUTOSYNC_BASE_URL"].rstrip("/")
+    if PRODUCT_ID == "pluschwood" and os.environ.get("PLUSCHWOOD_BASE_URL"):
+        return os.environ["PLUSCHWOOD_BASE_URL"].rstrip("/")
+    return DESTINATION_BASE_URL
 
 
 class SyncApp:
     def __init__(self):
         sync_log.ensure_stdio()
         self.config = AgentConfig()
-        self.presets = [
-            {
-                **preset,
-                "base_url": (
-                    os.environ["AUTOSYNC_BASE_URL"].rstrip("/")
-                    if preset["id"] == "autosync" and os.environ.get("AUTOSYNC_BASE_URL")
-                    else preset["base_url"]
-                ),
-            }
-            for preset in PRESETS
-        ]
+        self.destination_label = DESTINATION_LABEL
+        self.destination_base_url = _product_base_url()
         self.store = LocalStore(self.config.db_path)
         destination_store.migrate_legacy_destination(
             self.store,
@@ -132,13 +139,17 @@ class SyncApp:
         self._progress("Starting initial import (this can take a while)")
         self.run_import(force=True)
 
+    def _fixed_destination(self) -> Destination:
+        return destination_store.upsert_destination(
+            self.store,
+            label=self.destination_label,
+            base_url=self.destination_base_url,
+            destination_id=DESTINATION_ID,
+        )
+
     def sign_in_connect(self) -> None:
         """Browser login registration — preferred over pairing codes."""
         try:
-            choice = ask_destination_login(self.presets)
-            if not choice:
-                self.last_message = "Sign-in cancelled"
-                return
             self._progress(f"Checking Tally at {self.config.tally_url}")
             health = self.tally.health()
             if not health["ok"]:
@@ -150,11 +161,7 @@ class SyncApp:
                 self.last_message = "Tally did not return a company ID and name"
                 self._progress(self.last_message)
                 return
-            destination = destination_store.upsert_destination(
-                self.store,
-                label=choice["label"],
-                base_url=choice["base_url"],
-            )
+            destination = self._fixed_destination()
             client = AutoSyncClient(destination.base_url)
             try:
                 session = client.create_device_session(company, agent_version="autosync-tally-agent")
@@ -163,8 +170,8 @@ class SyncApp:
                 if "404" in text:
                     raise RuntimeError(
                         f"{destination.base_url} has no /api/integrations/tally/device-sessions yet. "
-                        "Deploy the Pluschwood/AutoSync backend with browser-login support, "
-                        "or use tray → Enter pairing code… until then."
+                        "Deploy the backend with browser-login support, "
+                        "or use Connection → Enter pairing code… until then."
                     ) from exc
                 raise
             user_code = session.get("user_code") or ""
@@ -203,8 +210,8 @@ class SyncApp:
     def pair(self) -> None:
         """Fallback pairing-code registration."""
         try:
-            choice = ask_destination_pair(self.presets)
-            if not choice:
+            code = ask_pairing_code(f"Pair with {self.destination_label}")
+            if not code:
                 self.last_message = "Pairing cancelled"
                 return
             self._progress(f"Checking Tally at {self.config.tally_url}")
@@ -214,16 +221,12 @@ class SyncApp:
                 self._progress(self.last_message)
                 return
             self._progress(f"Tally company: {health.get('company') or '(loaded)'}")
-            destination = destination_store.upsert_destination(
-                self.store,
-                label=choice["label"],
-                base_url=choice["base_url"],
-            )
+            destination = self._fixed_destination()
             brand_id = self.store.get_meta("brand_id")
             client = AutoSyncClient(destination.base_url)
             self._progress(f"Calling {client.base_url}/api/integrations/tally/pair")
             result = client.pair(
-                choice["code"],
+                code,
                 health["detail"],
                 int(self.store.get_meta("interval_hours", self.config.default_interval_hours) or 6),
                 brand_id=brand_id,
@@ -243,11 +246,7 @@ class SyncApp:
         self.config.import_to_date = self.store.get_meta("import_to_date", self.config.import_to_date)
         forced = set(force_destination_ids or ())
         if force:
-            forced.update(
-                destination.id
-                for destination, _token in self.paired()
-                if destination_store.is_pluschwood(destination)
-            )
+            forced.update(destination.id for destination, _token in self.paired())
         try:
             range_bit = ""
             if self.config.import_from_date or self.config.import_to_date:
@@ -458,8 +457,9 @@ class SyncApp:
         try:
             info = self.check_update_info()
             self.last_message = info["message"]
-            if info.get("update_available") and info.get("release_url"):
-                webbrowser.open(info["release_url"])
+            download = info.get("asset_url") or info.get("release_url")
+            if info.get("update_available") and download:
+                webbrowser.open(download)
         except Exception as exc:
             self.last_message = f"Update check failed: {exc}"
             sync_log.log_event(self.last_message, data_dir=self.config.data_dir)

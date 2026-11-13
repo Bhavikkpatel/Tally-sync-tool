@@ -56,7 +56,8 @@ class DeviceLoginTests(unittest.TestCase):
             app = SyncApp.__new__(SyncApp)
             app.config = AgentConfig(data_dir=data_dir)
             app.store = LocalStore(data_dir / "agent.sqlite3")
-            app.presets = [{"id": "pluschwood", "label": "Pluschwood Console", "base_url": "https://console.pluschwood.com"}]
+            app.destination_label = "Pluschwood Console"
+            app.destination_base_url = "https://console.pluschwood.com"
             app.tally = MagicMock()
             app.tally.health.return_value = {
                 "ok": True,
@@ -69,10 +70,7 @@ class DeviceLoginTests(unittest.TestCase):
             import_calls = []
             app.run_import = lambda force=False: import_calls.append(force)
 
-            with patch("agent.__main__.ask_destination_login", return_value={
-                "label": "Pluschwood Console",
-                "base_url": "https://console.pluschwood.com",
-            }), patch("agent.__main__.webbrowser.open") as open_browser, patch(
+            with patch("agent.__main__.webbrowser.open") as open_browser, patch(
                 "agent.__main__.AutoSyncClient"
             ) as client_cls, patch("agent.__main__.time.sleep"):
                 client = client_cls.return_value
