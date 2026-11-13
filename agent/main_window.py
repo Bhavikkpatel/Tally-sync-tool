@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import webbrowser
 from dataclasses import dataclass
@@ -23,298 +24,246 @@ class AppController:
     on_quit: Callable[[], None]
 
 
+HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Tally Sync</title>
+<style>
+  :root { color-scheme: light; --bg:#f3f4f6; --card:#fff; --text:#111827; --muted:#6b7280; --line:#e5e7eb; --accent:#15803d; --danger:#b91c1c; --blue:#1d4ed8; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 "Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; align-items:center; gap:12px; padding:18px 22px 8px; }
+  h1 { margin:0; font-size:22px; font-weight:650; }
+  .muted { color:var(--muted); }
+  .wrap { padding:0 22px 22px; }
+  .sub { margin:0 0 16px; color:var(--muted); max-width:820px; }
+  .cards { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:14px; }
+  .card, .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .card h2, .panel h2 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .value { font-size:16px; font-weight:650; word-break:break-word; }
+  .ok { color:var(--accent); } .bad { color:var(--danger); }
+  .actions { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  button { appearance:none; border:1px solid var(--line); background:#fff; border-radius:8px; padding:10px 12px; font:inherit; cursor:pointer; }
+  button:hover { background:#f9fafb; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.primary:hover { filter:brightness(.95); }
+  form { display:grid; gap:10px; margin-top:8px; }
+  label { display:grid; gap:4px; font-size:13px; }
+  input, select { padding:9px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:12px; }
+  #flash { color:var(--blue); min-height:1.2em; }
+  footer { margin-top:14px; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Tally Sync</h1>
+    <span class="muted" id="version"></span>
+    <div style="flex:1"></div>
+    <button onclick="api('hide')">Hide to tray</button>
+    <button onclick="api('quit')">Quit</button>
+  </header>
+  <div class="wrap">
+    <p class="sub">Sync the open Tally company with Pluschwood or AutoSync. Closing or hiding keeps the app in the system tray.</p>
+    <div class="cards">
+      <div class="card"><h2>Tally</h2><div class="value" id="tally">—</div><div class="muted">Open company via HTTP</div></div>
+      <div class="card"><h2>Destinations</h2><div class="value" id="dest">—</div><div class="muted" id="mapping">Mapping: —</div></div>
+      <div class="card"><h2>Activity</h2><div class="value" id="activity">—</div><div class="muted" id="status">—</div></div>
+    </div>
+    <div class="panel" style="margin-bottom:14px">
+      <h2>Connection</h2>
+      <div class="actions">
+        <button class="primary" onclick="api('sign_in')">Sign in to connect</button>
+        <button onclick="api('pair')">Enter pairing code</button>
+        <button onclick="api('import')">Run full import</button>
+        <button onclick="api('sync')">Sync now</button>
+        <button onclick="api('mapping')">Ledger mapping</button>
+        <button onclick="api('log')">Open sync log</button>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Settings</h2>
+      <form onsubmit="return saveSettings(event)">
+        <label>Tally HTTP URL<input id="tally_url" /></label>
+        <label>Import from date (YYYY-MM-DD)<input id="from_date" placeholder="YYYY-MM-DD" /></label>
+        <label>Import to date (YYYY-MM-DD)<input id="to_date" placeholder="YYYY-MM-DD" /></label>
+        <label>Outbound interval (hours)
+          <select id="interval"><option>3</option><option selected>6</option></select>
+        </label>
+        <div class="muted" id="data_dir"></div>
+        <div class="row">
+          <button class="primary" type="submit">Save settings</button>
+          <button type="button" onclick="api('update')">Check for updates</button>
+          <button type="button" onclick="refresh()">Refresh</button>
+          <button type="button" onclick="api('github')">GitHub</button>
+          <span id="flash"></span>
+        </div>
+      </form>
+    </div>
+    <footer>Tray menu: Open window · Open sync log · Quit</footer>
+  </div>
+<script>
+  async function api(name, payload) {
+    document.getElementById('flash').textContent = 'Working…';
+    try {
+      const result = await window.pywebview.api.call(name, payload || null);
+      document.getElementById('flash').textContent = (result && result.message) || 'Done';
+      if (result && result.alert) alert(result.alert);
+      if (result && result.open_url) window.open(result.open_url, '_blank');
+      await refresh();
+      return result;
+    } catch (err) {
+      document.getElementById('flash').textContent = String(err);
+      alert(String(err));
+    }
+  }
+  async function refresh() {
+    const data = await window.pywebview.api.call('refresh', null);
+    if (!data) return;
+    const tally = document.getElementById('tally');
+    tally.textContent = data.tally || '—';
+    tally.className = 'value ' + (data.tally_ok ? 'ok' : 'bad');
+    document.getElementById('dest').textContent = data.destinations || 'none';
+    document.getElementById('mapping').textContent = 'Mapping: ' + (data.mapping || '—');
+    document.getElementById('activity').textContent = data.last_message || data.status || '—';
+    document.getElementById('status').textContent = data.status || '';
+    document.getElementById('version').textContent = 'v' + (data.version || '');
+    document.getElementById('tally_url').value = data.tally_url || '';
+    document.getElementById('from_date').value = data.import_from_date || '';
+    document.getElementById('to_date').value = data.import_to_date || '';
+    document.getElementById('interval').value = String(data.interval_hours || 6);
+    document.getElementById('data_dir').textContent = 'Data folder: ' + (data.data_dir || '');
+  }
+  async function saveSettings(event) {
+    event.preventDefault();
+    await api('save', {
+      tally_url: document.getElementById('tally_url').value,
+      import_from_date: document.getElementById('from_date').value || null,
+      import_to_date: document.getElementById('to_date').value || null,
+      interval_hours: Number(document.getElementById('interval').value || 6)
+    });
+    return false;
+  }
+  window.addEventListener('pywebviewready', () => { refresh(); setInterval(refresh, 5000); });
+</script>
+</body>
+</html>
+"""
+
+
+class _Api:
+    def __init__(self, controller: AppController, window: "MainWindow"):
+        self.controller = controller
+        self.window = window
+
+    def call(self, name: str, payload: dict | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        if name == "refresh":
+            detail = self.controller.get_detail()
+            detail["status"] = self.controller.get_status()
+            return detail
+        if name == "hide":
+            self.window.hide_to_tray()
+            return {"message": "Hidden to tray"}
+        if name == "quit":
+            self.window.quit_app()
+            return {"message": "Quitting"}
+        if name == "save":
+            self.controller.save_settings(payload)
+            return {"message": "Settings saved", "alert": "Settings saved"}
+        if name in {"sign_in", "pair", "import", "sync", "mapping", "log"}:
+            actions = {
+                "sign_in": (self.controller.on_sign_in, "Sign-in started — complete approval in the browser"),
+                "pair": (self.controller.on_pair, "Pairing dialog opened"),
+                "import": (self.controller.on_import, "Import started"),
+                "sync": (self.controller.on_sync_now, "Sync started"),
+                "mapping": (self.controller.on_mapping, "Mapping dialog opened"),
+                "log": (self.controller.on_open_log, "Opened sync log"),
+            }
+            fn, message = actions[name]
+            threading.Thread(target=fn, daemon=True).start()
+            return {"message": message}
+        if name == "github":
+            webbrowser.open(GITHUB_REPO_URL)
+            return {"message": "Opened GitHub"}
+        if name == "update":
+            info = self.controller.on_check_update()
+            result: dict[str, Any] = {
+                "message": info.get("message") or "Update check complete",
+                "alert": info.get("message") or "Update check complete",
+            }
+            if info.get("update_available") and info.get("release_url"):
+                result["open_url"] = info["release_url"]
+                result["alert"] = f"Update available: v{info.get('latest_version')}. Opening release page."
+            return result
+        return {"message": f"Unknown action: {name}"}
+
+
 class MainWindow:
-    """Primary Windows application window. Close hides to tray; Quit exits."""
+    """Native Windows app window (WebView2 via pywebview). Close/hide keeps tray running."""
 
     def __init__(self, controller: AppController):
-        import tkinter as tk
-        from tkinter import messagebox, ttk
-
         self.controller = controller
-        self.tk = tk
-        self.messagebox = messagebox
-        self.root = tk.Tk()
-        self.root.title(APP_NAME)
-        self.root.geometry("900x640")
-        self.root.minsize(780, 560)
-        self.root.configure(bg="#f3f4f6")
-
-        style = ttk.Style(self.root)
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 18))
-        style.configure("Sub.TLabel", font=("Segoe UI", 10), foreground="#4b5563")
-        style.configure("Card.TLabelframe", padding=14)
-        style.configure("Card.TLabelframe.Label", font=("Segoe UI Semibold", 10))
-        style.configure("Accent.TButton", font=("Segoe UI", 10))
-        style.configure("StatusOk.TLabel", foreground="#15803d", font=("Segoe UI Semibold", 11))
-        style.configure("StatusBad.TLabel", foreground="#b91c1c", font=("Segoe UI Semibold", 11))
-
-        self.status_var = tk.StringVar(value="Starting…")
-        self.tally_var = tk.StringVar(value="—")
-        self.dest_var = tk.StringVar(value="—")
-        self.mapping_var = tk.StringVar(value="—")
-        self.activity_var = tk.StringVar(value="")
-        self.version_var = tk.StringVar(value=f"Version {__version__}")
-        self.update_var = tk.StringVar(value="")
-        self.tally_url = tk.StringVar()
-        self.from_date = tk.StringVar()
-        self.to_date = tk.StringVar()
-        self.interval = tk.StringVar(value="6")
-        self.data_dir_var = tk.StringVar(value="")
+        self._window = None
         self._hidden = False
-
-        self._build_menu()
-        self._build_layout(ttk)
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
-        self.root.bind("<Map>", lambda _e: setattr(self, "_hidden", False))
-        self.refresh()
-        self.root.after(5000, self._tick)
-
-    def _build_menu(self) -> None:
-        menubar = self.tk.Menu(self.root)
-        file_menu = self.tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Hide to tray", command=self.hide_to_tray)
-        file_menu.add_separator()
-        file_menu.add_command(label="Quit", command=self.quit_app)
-        menubar.add_cascade(label="File", menu=file_menu)
-
-        connect_menu = self.tk.Menu(menubar, tearoff=0)
-        connect_menu.add_command(label="Sign in to connect…", command=lambda: self._run(self.controller.on_sign_in, "Sign in"))
-        connect_menu.add_command(label="Enter pairing code…", command=lambda: self._run(self.controller.on_pair, "Pairing"))
-        connect_menu.add_separator()
-        connect_menu.add_command(label="Run full import", command=lambda: self._run(self.controller.on_import, "Import"))
-        connect_menu.add_command(label="Sync now", command=lambda: self._run(self.controller.on_sync_now, "Sync"))
-        connect_menu.add_command(label="Ledger mapping…", command=lambda: self._run(self.controller.on_mapping, "Mapping"))
-        menubar.add_cascade(label="Connection", menu=connect_menu)
-
-        tools_menu = self.tk.Menu(menubar, tearoff=0)
-        tools_menu.add_command(label="Open sync log", command=lambda: self._run(self.controller.on_open_log, "Open log"))
-        tools_menu.add_command(label="Check for updates…", command=self.check_update)
-        tools_menu.add_command(label="Refresh status", command=self.refresh)
-        menubar.add_cascade(label="Tools", menu=tools_menu)
-
-        help_menu = self.tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="GitHub repository", command=lambda: webbrowser.open(GITHUB_REPO_URL))
-        help_menu.add_command(label="Releases", command=lambda: webbrowser.open(GITHUB_RELEASES_URL))
-        help_menu.add_command(label="About", command=self._about)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        self.root.config(menu=menubar)
-
-    def _build_layout(self, ttk) -> None:
-        shell = ttk.Frame(self.root, padding=18)
-        shell.pack(fill="both", expand=True)
-
-        header = ttk.Frame(shell)
-        header.pack(fill="x")
-        ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
-        ttk.Label(header, textvariable=self.version_var, style="Sub.TLabel").pack(side="right", padx=(8, 0))
-        ttk.Button(header, text="Hide to tray", command=self.hide_to_tray).pack(side="right")
-
-        ttk.Label(
-            shell,
-            text="Sync the open Tally company with Pluschwood or AutoSync. Closing this window keeps the app in the tray.",
-            style="Sub.TLabel",
-            wraplength=820,
-        ).pack(anchor="w", pady=(4, 14))
-
-        # Dashboard cards
-        dash = ttk.Frame(shell)
-        dash.pack(fill="x")
-        for col in range(3):
-            dash.columnconfigure(col, weight=1, uniform="cards")
-
-        card1 = ttk.LabelFrame(dash, text="Tally", style="Card.TLabelframe")
-        card1.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        self.tally_status_label = ttk.Label(card1, textvariable=self.tally_var, style="StatusOk.TLabel")
-        self.tally_status_label.pack(anchor="w")
-        ttk.Label(card1, text="Open company over HTTP gateway", style="Sub.TLabel").pack(anchor="w", pady=(4, 0))
-
-        card2 = ttk.LabelFrame(dash, text="Destinations", style="Card.TLabelframe")
-        card2.grid(row=0, column=1, sticky="nsew", padx=4)
-        ttk.Label(card2, textvariable=self.dest_var, style="StatusOk.TLabel").pack(anchor="w")
-        ttk.Label(card2, textvariable=self.mapping_var, style="Sub.TLabel").pack(anchor="w", pady=(4, 0))
-
-        card3 = ttk.LabelFrame(dash, text="Activity", style="Card.TLabelframe")
-        card3.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
-        ttk.Label(card3, textvariable=self.status_var, wraplength=240, justify="left").pack(anchor="w")
-        ttk.Label(card3, textvariable=self.activity_var, style="Sub.TLabel", wraplength=240, justify="left").pack(
-            anchor="w", pady=(4, 0)
-        )
-
-        # Connection actions
-        actions = ttk.LabelFrame(shell, text="Connection", style="Card.TLabelframe")
-        actions.pack(fill="x", pady=(14, 0))
-        row = ttk.Frame(actions)
-        row.pack(fill="x")
-        for i, (label, cmd) in enumerate(
-            [
-                ("Sign in to connect", lambda: self._run(self.controller.on_sign_in, "Sign in")),
-                ("Enter pairing code", lambda: self._run(self.controller.on_pair, "Pairing")),
-                ("Run full import", lambda: self._run(self.controller.on_import, "Import")),
-                ("Sync now", lambda: self._run(self.controller.on_sync_now, "Sync")),
-                ("Ledger mapping", lambda: self._run(self.controller.on_mapping, "Mapping")),
-                ("Open sync log", lambda: self._run(self.controller.on_open_log, "Open log")),
-            ]
-        ):
-            ttk.Button(row, text=label, command=cmd, style="Accent.TButton").grid(
-                row=0, column=i, sticky="ew", padx=3, pady=2
-            )
-            row.columnconfigure(i, weight=1)
-
-        # Settings
-        settings = ttk.LabelFrame(shell, text="Settings", style="Card.TLabelframe")
-        settings.pack(fill="both", expand=True, pady=(14, 0))
-        settings.columnconfigure(1, weight=1)
-
-        def field(r: int, label: str, var, widget="entry") -> None:
-            ttk.Label(settings, text=label).grid(row=r, column=0, sticky="w", pady=5, padx=(0, 10))
-            if widget == "combo":
-                ttk.Combobox(settings, textvariable=var, values=("3", "6"), width=10, state="readonly").grid(
-                    row=r, column=1, sticky="w", pady=5
-                )
-            else:
-                ttk.Entry(settings, textvariable=var).grid(row=r, column=1, sticky="ew", pady=5)
-
-        field(0, "Tally HTTP URL", self.tally_url)
-        field(1, "Import from date (YYYY-MM-DD)", self.from_date)
-        field(2, "Import to date (YYYY-MM-DD)", self.to_date)
-        field(3, "Outbound interval (hours)", self.interval, widget="combo")
-        ttk.Label(settings, text="Data folder").grid(row=4, column=0, sticky="w", pady=5, padx=(0, 10))
-        ttk.Label(settings, textvariable=self.data_dir_var, style="Sub.TLabel").grid(row=4, column=1, sticky="w", pady=5)
-
-        bottom = ttk.Frame(settings)
-        bottom.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        ttk.Button(bottom, text="Save settings", command=self.save).pack(side="left")
-        ttk.Button(bottom, text="Check for updates", command=self.check_update).pack(side="left", padx=8)
-        ttk.Button(bottom, text="Refresh", command=self.refresh).pack(side="left")
-        ttk.Label(bottom, textvariable=self.update_var, style="Sub.TLabel").pack(side="left", padx=12)
-
-    def _about(self) -> None:
-        self.messagebox.showinfo(
-            APP_NAME,
-            f"{APP_NAME}\nVersion {__version__}\n\nGitHub: {GITHUB_REPO_URL}\n\n"
-            "Keep Tally open with a company loaded. Use Sign in to connect to register this PC.",
-        )
+        self._quitting = False
+        self._api = _Api(controller, self)
 
     def hide_to_tray(self) -> None:
         self._hidden = True
-        self.root.withdraw()
-        self.update_var.set("Running in the system tray. Use Open window to restore.")
+        if self._window is not None:
+            self._window.hide()
 
     def show(self) -> None:
         self._hidden = False
-        try:
-            self.root.deiconify()
-            self.root.lift()
-            self.root.focus_force()
-            self.refresh()
-        except Exception:
-            pass
+        if self._window is not None:
+            self._window.show()
+            try:
+                self._window.restore()
+            except Exception:
+                pass
 
     def quit_app(self) -> None:
+        self._quitting = True
         try:
             self.controller.on_quit()
         finally:
-            try:
-                self.root.quit()
-            except Exception:
-                pass
-            try:
-                self.root.destroy()
-            except Exception:
-                pass
+            if self._window is not None:
+                try:
+                    self._window.destroy()
+                except Exception:
+                    pass
 
-    def _run(self, fn: Callable[[], None], label: str) -> None:
-        self.update_var.set(f"Running {label}…")
+    def run(self) -> None:
+        import webview
 
-        def work() -> None:
-            try:
-                fn()
-                self.root.after(0, lambda: (self.refresh(), self.update_var.set(f"{label} finished")))
-            except Exception as exc:
-                self.root.after(0, lambda: (self.update_var.set(str(exc)), self.messagebox.showerror(APP_NAME, str(exc))))
+        self._window = webview.create_window(
+            APP_NAME,
+            html=HTML,
+            js_api=self._api,
+            width=920,
+            height=700,
+            min_size=(780, 560),
+        )
 
-        threading.Thread(target=work, daemon=True).start()
+        def on_closing() -> bool:
+            if self._quitting:
+                return True
+            # Cancel OS close and keep running in the tray.
+            self.hide_to_tray()
+            return False
 
-    def refresh(self) -> None:
         try:
-            self.status_var.set(self.controller.get_status())
-            detail = self.controller.get_detail()
-            tally_ok = bool(detail.get("tally_ok"))
-            self.tally_var.set(str(detail.get("tally") or "—"))
-            self.tally_status_label.configure(style="StatusOk.TLabel" if tally_ok else "StatusBad.TLabel")
-            self.dest_var.set(str(detail.get("destinations") or "none"))
-            self.mapping_var.set(f"Mapping: {detail.get('mapping') or '—'}")
-            self.activity_var.set(str(detail.get("last_message") or ""))
-            self.tally_url.set(str(detail.get("tally_url") or ""))
-            self.from_date.set(str(detail.get("import_from_date") or ""))
-            self.to_date.set(str(detail.get("import_to_date") or ""))
-            self.interval.set(str(detail.get("interval_hours") or "6"))
-            self.data_dir_var.set(str(detail.get("data_dir") or ""))
-            self.version_var.set(f"Version {detail.get('version') or __version__}")
-        except Exception as exc:
-            self.status_var.set(f"Status error: {exc}")
-
-    def save(self) -> None:
-        try:
-            self.controller.save_settings(
-                {
-                    "tally_url": self.tally_url.get().strip(),
-                    "import_from_date": self.from_date.get().strip() or None,
-                    "import_to_date": self.to_date.get().strip() or None,
-                    "interval_hours": int(self.interval.get() or 6),
-                }
-            )
-            self.refresh()
-            self.messagebox.showinfo(APP_NAME, "Settings saved")
-        except Exception as exc:
-            self.messagebox.showerror(APP_NAME, str(exc))
-
-    def check_update(self) -> None:
-        self.update_var.set("Checking GitHub for updates…")
-
-        def work() -> None:
-            try:
-                info = self.controller.on_check_update()
-            except Exception as exc:
-                self.root.after(0, lambda: (self.update_var.set(str(exc)), self.messagebox.showerror(APP_NAME, str(exc))))
-                return
-
-            def done() -> None:
-                self.update_var.set(
-                    f"{info.get('message')} (current v{info.get('current_version')}, latest v{info.get('latest_version')})"
-                )
-                if info.get("update_available"):
-                    if self.messagebox.askyesno(
-                        APP_NAME,
-                        f"Version {info.get('latest_version')} is available.\n\nOpen the release page to download?",
-                    ):
-                        webbrowser.open(info.get("release_url") or GITHUB_RELEASES_URL)
-                else:
-                    self.messagebox.showinfo(APP_NAME, info.get("message") or "No update available")
-
-            self.root.after(0, done)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _tick(self) -> None:
-        if not self._hidden:
-            self.refresh()
-        try:
-            self.root.after(5000, self._tick)
+            self._window.events.closing += on_closing
         except Exception:
             pass
 
-    def run(self) -> None:
-        self.root.mainloop()
+        # Prefer Edge WebView2 on Windows; fall back to default if unavailable.
+        try:
+            webview.start(gui="edgechromium", debug=False)
+        except Exception:
+            webview.start(debug=False)
 
 
-# Back-compat alias used by older imports
 SettingsController = AppController
-
-
-def open_settings(controller: AppController) -> None:
-    """Focus an existing main window if present; otherwise no-op (window owns the process)."""
-    # Kept for tray "Open window" — SyncApp holds the MainWindow instance.
-    raise RuntimeError("Use MainWindow.show() from SyncApp")
