@@ -23,12 +23,16 @@ from agent.mapping_dialog import ask_destination_login, ask_destination_pair, as
 from agent.outbound_runner import OutboundRunner
 from agent.scheduler import IntervalScheduler
 from agent.security import load_token, save_token
+from datetime import datetime, timedelta, timezone
+
 from agent.main_window import AppController, MainWindow
 from agent.storage import LocalStore
 from agent.tally_client import TallyClient
 from agent.tray import open_sync_log, run_tray
 from agent.updater import check_for_update
 from agent.version import APP_NAME, __version__
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 class SyncApp:
@@ -258,6 +262,7 @@ class SyncApp:
                 self._progress,
                 force_destination_ids=forced,
             ).run(force=False)
+            self._mark_synced("import")
             self.last_message = f"Import complete: {summary.get('destinations') or summary}"
             self._progress(self.last_message)
             if not OutboundRunner(self.store, self.tally, self._primary_client()).mapping_ready():
@@ -289,6 +294,7 @@ class SyncApp:
         try:
             sync_log.log_event("Sync now started", data_dir=self.config.data_dir)
             self.scheduled_tick()
+            self._mark_synced("sync")
             if not self.last_message.startswith("["):
                 self.last_message = "Synced"
         except Exception as exc:
@@ -359,6 +365,7 @@ class SyncApp:
                 )
                 summaries.append(f"{destination.label}: failed ({exc})")
         self.last_message = "; ".join(summaries) or "Outbound idle"
+        self._mark_synced("outbound")
 
     def _progress(self, message: str) -> None:
         # ImportRunner already writes IST count lines via sync_log; avoid double-logging those.
@@ -367,8 +374,15 @@ class SyncApp:
             return
         self.last_message = sync_log.log_event(message, data_dir=self.config.data_dir)
 
+    def _mark_synced(self, kind: str = "sync") -> None:
+        stamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        self.store.set_meta("last_sync_at", stamp)
+        self.store.set_meta("last_sync_kind", kind)
+
     def status_detail(self) -> dict:
         health = self.tally.health()
+        last_sync = self.store.get_meta("last_sync_at") or ""
+        last_kind = self.store.get_meta("last_sync_kind") or "sync"
         return {
             "version": __version__,
             "tally": health.get("company") if health.get("ok") else (health.get("error") or "offline"),
@@ -385,6 +399,9 @@ class SyncApp:
             "import_to_date": self.config.import_to_date or self.store.get_meta("import_to_date") or "",
             "interval_hours": int(self.store.get_meta("interval_hours", self.config.default_interval_hours) or 6),
             "last_message": self.last_message,
+            "last_sync_at": last_sync,
+            "last_sync_display": last_sync or "Never",
+            "last_sync_kind": last_kind,
         }
 
     def save_settings(self, values: dict) -> None:
