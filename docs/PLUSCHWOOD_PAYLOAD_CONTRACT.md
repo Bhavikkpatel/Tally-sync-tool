@@ -185,6 +185,9 @@ Banking is included only for Pluschwood destinations over HTTPS. It must not app
 ```
 
 Custom voucher types are included when their Tally parent/base type is Sales, Purchase, Receipt, or Payment.
+Journal / Contra / Credit Note / Debit Note / Delivery Note / Receipt Note / Stock Journal are also collected when present (`base_type` / `voucher_type_base` set); the console may skip projecting them into trade records.
+
+For Payment / Receipt, Tally **Account** is the bank/cash ledger and **Particulars** are party / expense / tax lines. When Account is bank/cash and Particulars has exactly one non-tax, non-round-off ledger, the agent sets `party_name` to that Particulars ledger (even if `PARTYLEDGERNAME` was the bank). GST remittance vouchers (bank → CGST/SGST/IGST only) are still sent without inventing a trade party.
 
 ## Receipt / Payment voucher
 
@@ -235,8 +238,12 @@ Older receivers can ignore new array fields and keep using `guid`, `alter_id`, `
 4. Tray → **Run initial import** — Pluschwood replays from AlterID 0; other destinations keep their cursors.
 5. Confirm the complete-phase summary: master counts, voucher counts by base type, and any zero-Purchase warning.
 
+## Outbound (Pluschwood → Tally)
+
+Timber installations: after inbound, the agent polls `GET /api/integrations/tally/outbound?limit=50`, writes `entity_type` `sales` / `receipt` using the feed `mapping` (required; no guessed ledger names), then `POST /api/integrations/tally/acknowledge` with `status` `ok` or `error`. See root README bidirectional section.
+
 ## Live gaps
 
-- Tally voucher XML does not embed a party ledger GUID; `party_ledger_id` is `null` and Pluschwood should join on `party_name` ↔ ledger `stable_id`/`name` after masters import.
+- Tally voucher XML does not embed a party ledger GUID; `party_ledger_id` is usually `null` and Pluschwood should join on `party_name` ↔ ledger `stable_id`/`name` after masters import.
 - Stock-item HSN may live under `HSNDETAILS.LIST` (parsed) while invoice lines carry `GSTHSNNAME`.
 - Purchase vouchers are exported when present; a company with none yields a warning, not an error.

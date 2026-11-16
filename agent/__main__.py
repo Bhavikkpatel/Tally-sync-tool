@@ -469,10 +469,14 @@ class SyncApp:
                 return "No companies open in Tally"
             due: list[tuple[Destination, AutoSyncClient]] = []
             forced: set[str] = set()
-            for destination, client in self._company_targets():
+            targets = self._company_targets()
+            for destination, client in targets:
                 remote: dict = {}
                 try:
                     remote = client.status().get("installation") or {}
+                    if remote.get("mapping"):
+                        self.store.set_meta("ledger_mapping", remote["mapping"])
+                        self.store.set_meta(f"ledger_mapping_{destination.id}", remote["mapping"])
                 except Exception as exc:
                     if not force:
                         self._progress(f"{destination.label}: status failed ({exc})")
@@ -489,12 +493,43 @@ class SyncApp:
                     forced.add(destination.id)
                 if force or destination.id in forced or time.time() - last >= hours * 3600:
                     due.append((destination, client))
-            if not due:
-                return f"Up to date ({len(companies)} companies open)"
-            self._import_companies(due, forced, incremental=not force, companies=companies)
+            # Heartbeat → inbound → outbound → acknowledge (per destination).
+            for destination, client in targets:
+                try:
+                    client.heartbeat(
+                        "online",
+                        bool(self.store.get_meta(f"import_failed_{destination.id}")),
+                    )
+                except Exception as exc:
+                    self._progress(f"{destination.label}: heartbeat failed ({exc})")
+            if due:
+                self._import_companies(due, forced, incremental=not force, companies=companies)
+            outbound_bits: list[str] = []
+            for destination, client in targets:
+                try:
+                    summary = OutboundRunner(self.store, self.tally, client, self._progress).run()
+                    if summary.get("pushed") or summary.get("failed") or summary.get("skipped"):
+                        sync_log.log_event(
+                            f"{destination.label} · outbound",
+                            data_dir=self.config.data_dir,
+                            counts=summary if isinstance(summary, dict) else {},
+                        )
+                        outbound_bits.append(f"{destination.label} outbound={summary}")
+                except Exception as exc:
+                    sync_log.log_event(
+                        f"{destination.label} · outbound failed: {exc}",
+                        data_dir=self.config.data_dir,
+                    )
+                    outbound_bits.append(f"{destination.label} outbound failed ({exc})")
             for company in companies:
                 self._mark_synced("sync", company)
-            return f"Synced {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}"
+            if not due and not outbound_bits:
+                return f"Up to date ({len(companies)} companies open)"
+            parts = []
+            if due:
+                parts.append(f"Synced {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}")
+            parts.extend(outbound_bits)
+            return "; ".join(parts)
 
     def scheduled_tick(self, force_due=False) -> None:
         if PRODUCT_ID != "pluschwood":

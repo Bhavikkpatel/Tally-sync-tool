@@ -5,7 +5,7 @@ from typing import Any, Callable
 from agent import destinations as destination_store
 from agent import sync_log
 from agent import tally_xml
-from agent.autosync_client import AutoSyncClient
+from agent.autosync_client import AutoSyncClient, SyncPaused
 from agent.config import AgentConfig
 from agent.destinations import Destination
 from agent.storage import LocalStore
@@ -14,7 +14,7 @@ from agent.tally_client import TallyClient
 
 ProgressCallback = Callable[[str], None]
 
-RELEVANT_VOUCHER_BASES = {"sales", "purchase", "receipt", "payment"}
+RELEVANT_VOUCHER_BASES = tally_xml.EXTENDED_VOUCHER_BASES
 
 
 class ImportRunner:
@@ -97,11 +97,15 @@ class ImportRunner:
                     key = str(selected.get("guid") or selected.get("name") or destination.id)
                     try:
                         company_results[key] = self._import_destination(destination, client, selected)
+                    except SyncPaused as exc:
+                        company_results[key] = {"paused": True, "reason": str(exc), "company": selected.get("name")}
+                        self._log(f"{selected.get('name') or destination.label} · Inbound paused: {exc}")
                     except Exception as exc:
                         company_results[key] = {"error": str(exc), "company": selected.get("name")}
                         self._log(f"{selected.get('name') or destination.label} · Import failed: {exc}")
                 failed = any(result.get("error") for result in company_results.values())
-                if not failed and company_results:
+                paused = any(result.get("paused") for result in company_results.values())
+                if not failed and not paused and company_results:
                     destination_store.set_import_done(self.store, destination.id, True)
                 summary["destinations"][destination.id] = {
                     "companies": company_results,
@@ -347,7 +351,7 @@ class ImportRunner:
                 )
             else:
                 self._log(
-                    f"{label} · vouchers page skipped (no Sales/Purchase/Receipt/Payment)",
+                    f"{label} · vouchers page skipped (no relevant voucher types)",
                     {"scanned": len(page), "after_alter_id": cursor},
                 )
             destination_store.set_cursor(

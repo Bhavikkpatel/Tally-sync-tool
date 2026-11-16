@@ -113,6 +113,38 @@ Until a cert is configured, Windows may still warn; users can allow the file aft
 - Tray: Open window · Open sync log · Quit
 - Full Quit: File → Quit or tray → Quit
 
+## Bidirectional sync (Pluschwood / Timber)
+
+Pluschwood builds run this loop each sync:
+
+1. Heartbeat
+2. Inbound import (company → masters/parties → vouchers, `done: true`)
+3. `GET /api/integrations/tally/outbound?limit=50`
+4. Write Sales / Receipt vouchers into the open Tally company
+5. `POST /api/integrations/tally/acknowledge`
+
+`GET /status` and `GET /outbound` include `inbound_enabled` and `outbound_enabled`. When inbound is off, the agent skips import; a 409 from `POST /import` is a pause, not a crash. When outbound is off, the feed is empty and the agent does not write vouchers or acknowledge. Heartbeats still run.
+
+**Mapping required before outbound works** (names must match ledgers/voucher types in the open company):
+
+| Key | Purpose |
+| --- | --- |
+| `sales_voucher_type` | Tally sales voucher type (e.g. `Sales`) |
+| `sales_ledger` | Sales income ledger |
+| `cgst_ledger` / `sgst_ledger` / `igst_ledger` | Tax ledgers |
+| `round_off_ledger` | Round-off / charges ledger |
+| `receipt_ledger` | Bank or cash ledger used as **Account** on Receipt vouchers |
+
+Configure via **Connection → Ledger mapping…** or the console Tally sync settings. The agent prefers mapping returned on the outbound feed and will not invent ledger names.
+
+Outbound is **Timber sales + customer receipts only** in this pass (no purchase / supplier payment writes). Packaging-only invoice XML is not used for Pluschwood.
+
+Inbound Payment/Receipt collection sets `party_name` from **Particulars** when **Account** is a bank/cash ledger and there is exactly one non-tax party/expense ledger. GST remittance vouchers (bank → CGST/SGST only) are still uploaded.
+
+Manual sandbox checks: [docs/BIDIRECTIONAL_MANUAL_TEST.md](docs/BIDIRECTIONAL_MANUAL_TEST.md).
+
 ## Docs
 
 - [Pluschwood payload contract](docs/PLUSCHWOOD_PAYLOAD_CONTRACT.md)
+- [OMS customer/vendor ledger prompt](docs/OMS_CUSTOMER_VENDOR_LEDGER_PROMPT.md)
+- [Bidirectional manual test notes](docs/BIDIRECTIONAL_MANUAL_TEST.md)

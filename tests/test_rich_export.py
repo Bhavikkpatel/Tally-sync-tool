@@ -109,6 +109,17 @@ class RichExportTests(unittest.TestCase):
         payment = next(item for item in vouchers if item["voucher_number"] == "PAY-3")
         self.assertEqual(payment["ledger_entries"][0]["is_deemed_positive"], "Yes")
         self.assertEqual(payment["bill_allocations"][0]["bill_name"], "PUR-10")
+        self.assertEqual(payment["party_name"], "Board Mills")
+        self.assertEqual(payment["base_type"], "Payment")
+
+        # Account=bank in PARTYLEDGERNAME but Particulars=supplier → party is supplier.
+        bank_party = next(item for item in vouchers if item["voucher_number"] == "PAY-BANK-PARTY")
+        self.assertEqual(bank_party["party_name"], "Board Mills")
+
+        # GST remittance (bank → CGST/SGST only) still exported; party stays bank/declared.
+        gst_pay = next(item for item in vouchers if item["voucher_number"] == "PAY-GST")
+        self.assertEqual(len(gst_pay["ledger_entries"]), 3)
+        self.assertIn(gst_pay["party_name"], {None, "HDFC Bank"})
 
     def test_pluschwood_reimport_does_not_reset_other_destination_cursor(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -37,6 +37,23 @@ VOUCHER_FETCH = (
 )
 
 VOUCHER_BASE_TYPES = {"sales", "purchase", "receipt", "payment"}
+# Extra types Pluschwood accepts and ignores for trade projection (prefer send over drop).
+EXTENDED_VOUCHER_BASES = VOUCHER_BASE_TYPES | {
+    "journal",
+    "contra",
+    "credit note",
+    "debit note",
+    "delivery note",
+    "receipt note",
+    "stock journal",
+}
+
+_TAX_LEDGER_RE = re.compile(r"(?:\b|^)(cgst|sgst|igst|ugst|gst|vat|cess|tds|tcs)(?:\b|$)", re.I)
+_ROUND_OFF_RE = re.compile(r"round\s*off|rounding", re.I)
+_BANK_CASH_RE = re.compile(
+    r"\b(bank|cash|petty\s*cash|cash[- ]?in[- ]?hand|od\s*a/?c|overdraft)\b",
+    re.I,
+)
 
 BANKING_FIELD_KEYS = {
     "bankdetails",
@@ -317,49 +334,115 @@ def stock_item_xml(payload: dict) -> str:
 """.strip()
 
 
+def _require_mapping(mapping: dict, *keys: str) -> dict[str, str]:
+    missing = [key for key in keys if not str(mapping.get(key) or "").strip()]
+    if missing:
+        raise ValueError(f"Ledger mapping incomplete: missing {', '.join(missing)}")
+    return {key: str(mapping[key]).strip() for key in keys}
+
+
+def _nonzero_amount(value: Any) -> bool:
+    if value in {None, ""}:
+        return False
+    try:
+        return float(value) != 0
+    except (TypeError, ValueError):
+        return True
+
+
+def normalize_timber_sales_payload(payload: dict) -> dict:
+    """Map Pluschwood Timber outbound sales payload → sales_voucher_xml shape."""
+    lines = []
+    for line in payload.get("lines") or []:
+        lines.append(
+            {
+                "item_name": line.get("item_name") or line.get("description") or "Goods",
+                "quantity": line.get("quantity") if line.get("quantity") not in {None, ""} else "1",
+                "rate": line.get("rate") if line.get("rate") not in {None, ""} else (line.get("amount") or "0"),
+                "amount": line.get("amount") or "0",
+                "unit": line.get("unit") or "NOS",
+                "hsn": line.get("hsn") or "",
+            }
+        )
+    return {
+        "number": payload.get("voucher_number") or payload.get("number"),
+        "date": payload.get("date"),
+        "party_name": payload.get("party_name"),
+        "lines": lines,
+        "cgst": payload.get("cgst_amount") if payload.get("cgst_amount") is not None else payload.get("cgst", "0"),
+        "sgst": payload.get("sgst_amount") if payload.get("sgst_amount") is not None else payload.get("sgst", "0"),
+        "igst": payload.get("igst_amount") if payload.get("igst_amount") is not None else payload.get("igst", "0"),
+        "round_off": payload.get("charges") or payload.get("round_off") or "0",
+        "total": payload.get("amount") or payload.get("total") or "0",
+        "vehicle_no": payload.get("vehicle_no") or "",
+        "delivery_address": payload.get("delivery_address") or "",
+        "narration": payload.get("bill_reference") or payload.get("narration") or "",
+    }
+
+
 def sales_voucher_xml(payload: dict, mapping: dict) -> str:
-    party = escape(payload["party_name"])
-    number = escape(payload["number"])
+    required = _require_mapping(
+        mapping,
+        "sales_voucher_type",
+        "sales_ledger",
+        "cgst_ledger",
+        "sgst_ledger",
+        "igst_ledger",
+        "round_off_ledger",
+    )
+    party_name = payload.get("party_name")
+    number = payload.get("number") or payload.get("voucher_number")
+    if not party_name or not number or not payload.get("date"):
+        raise ValueError("Sales payload requires party_name, number/voucher_number, and date")
+    party = escape(str(party_name))
+    number_esc = escape(str(number))
     date = escape(str(payload["date"]).replace("-", ""))
-    voucher_type = escape(mapping.get("sales_voucher_type") or "Sales")
-    sales_ledger = escape(mapping.get("sales_ledger") or "Sales")
-    cgst_ledger = escape(mapping.get("cgst_ledger") or "CGST")
-    sgst_ledger = escape(mapping.get("sgst_ledger") or "SGST")
-    igst_ledger = escape(mapping.get("igst_ledger") or "IGST")
+    voucher_type = escape(required["sales_voucher_type"])
+    sales_ledger = escape(required["sales_ledger"])
+    cgst_ledger = escape(required["cgst_ledger"])
+    sgst_ledger = escape(required["sgst_ledger"])
+    igst_ledger = escape(required["igst_ledger"])
+    round_off_ledger = escape(required["round_off_ledger"])
     vehicle = escape(payload.get("vehicle_no") or "")
     delivery = escape(payload.get("delivery_address") or "")
+    narration = escape(payload.get("narration") or "")
     inventory_lines = []
     for line in payload.get("lines") or []:
+        item_name = line.get("item_name") or line.get("description")
+        if not item_name:
+            raise ValueError("Sales line missing item_name")
+        unit = line.get("unit") or "NOS"
+        qty = line.get("quantity") if line.get("quantity") not in {None, ""} else "1"
+        rate = line.get("rate") if line.get("rate") not in {None, ""} else (line.get("amount") or "0")
+        amount = line.get("amount") or "0"
         inventory_lines.append(
             f"""
   <ALLINVENTORYENTRIES.LIST>
-   <STOCKITEMNAME>{escape(line['item_name'])}</STOCKITEMNAME>
+   <STOCKITEMNAME>{escape(str(item_name))}</STOCKITEMNAME>
    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-   <RATE>{escape(str(line['rate']))}/{escape(line.get('unit') or 'NOS')}</RATE>
-   <AMOUNT>{escape(str(line['amount']))}</AMOUNT>
-   <ACTUALQTY>{escape(str(line['quantity']))} {escape(line.get('unit') or 'NOS')}</ACTUALQTY>
-   <BILLEDQTY>{escape(str(line['quantity']))} {escape(line.get('unit') or 'NOS')}</BILLEDQTY>
+   <RATE>{escape(str(rate))}/{escape(str(unit))}</RATE>
+   <AMOUNT>{escape(str(amount))}</AMOUNT>
+   <ACTUALQTY>{escape(str(qty))} {escape(str(unit))}</ACTUALQTY>
+   <BILLEDQTY>{escape(str(qty))} {escape(str(unit))}</BILLEDQTY>
    <ACCOUNTINGALLOCATIONS.LIST>
     <LEDGERNAME>{sales_ledger}</LEDGERNAME>
     <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-    <AMOUNT>{escape(str(line['amount']))}</AMOUNT>
+    <AMOUNT>{escape(str(amount))}</AMOUNT>
    </ACCOUNTINGALLOCATIONS.LIST>
   </ALLINVENTORYENTRIES.LIST>
 """.strip()
         )
+    if not inventory_lines:
+        raise ValueError("Sales payload has no inventory lines")
     tax_lines = []
     for ledger, amount in (
         (cgst_ledger, payload.get("cgst") or "0"),
         (sgst_ledger, payload.get("sgst") or "0"),
         (igst_ledger, payload.get("igst") or "0"),
+        (round_off_ledger, payload.get("round_off") or "0"),
     ):
-        if amount in {None, ""}:
+        if not _nonzero_amount(amount):
             continue
-        try:
-            if float(amount) == 0:
-                continue
-        except (TypeError, ValueError):
-            pass
         tax_lines.append(
             f"""
   <LEDGERENTRIES.LIST>
@@ -369,13 +452,14 @@ def sales_voucher_xml(payload: dict, mapping: dict) -> str:
   </LEDGERENTRIES.LIST>
 """.strip()
         )
-    party_amount = escape(str(payload.get("total") or "0"))
+    party_amount = escape(str(payload.get("total") or payload.get("amount") or "0"))
     return f"""
 <VOUCHER VCHTYPE="{voucher_type}" ACTION="Alter" OBJVIEW="Invoice Voucher View">
  <DATE>{date}</DATE>
  <VOUCHERTYPENAME>{voucher_type}</VOUCHERTYPENAME>
- <VOUCHERNUMBER>{number}</VOUCHERNUMBER>
- <REFERENCE>{number}</REFERENCE>
+ <VOUCHERNUMBER>{number_esc}</VOUCHERNUMBER>
+ <REFERENCE>{number_esc}</REFERENCE>
+ <NARRATION>{narration}</NARRATION>
  <PARTYLEDGERNAME>{party}</PARTYLEDGERNAME>
  <BASICBASEPARTYNAME>{party}</BASICBASEPARTYNAME>
  <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
@@ -388,7 +472,7 @@ def sales_voucher_xml(payload: dict, mapping: dict) -> str:
   <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
   <AMOUNT>-{party_amount}</AMOUNT>
   <BILLALLOCATIONS.LIST>
-   <NAME>{number}</NAME>
+   <NAME>{number_esc}</NAME>
    <BILLTYPE>New Ref</BILLTYPE>
    <AMOUNT>-{party_amount}</AMOUNT>
   </BILLALLOCATIONS.LIST>
@@ -399,22 +483,52 @@ def sales_voucher_xml(payload: dict, mapping: dict) -> str:
 """.strip()
 
 
+def _receipt_bill_type(allocation_type: str | None) -> str:
+    kind = (allocation_type or "").strip().lower()
+    if kind in {"against_reference", "agst ref", "against"}:
+        return "Agst Ref"
+    if kind in {"advance"}:
+        return "Advance"
+    return "On Account"
+
+
 def receipt_voucher_xml(payload: dict, mapping: dict) -> str:
-    party = escape(payload["party_name"])
-    number = escape(payload.get("number") or f"RCPT-{payload['id']}")
+    required = _require_mapping(mapping, "receipt_ledger")
+    party_name = payload.get("party_name")
+    if not party_name or payload.get("date") is None or payload.get("amount") is None:
+        raise ValueError("Receipt payload requires party_name, date, and amount")
+    party = escape(str(party_name))
+    number = escape(str(payload.get("number") or payload.get("voucher_number") or f"RCPT-{payload.get('id') or 'X'}"))
     date = escape(str(payload["date"]).replace("-", ""))
     amount = escape(str(payload["amount"]))
-    bank = escape(mapping.get("receipt_ledger") or "Cash")
-    bill = escape(payload.get("invoice_number") or "")
-    allocation = ""
-    if bill:
-        allocation = f"""
+    bank = escape(required["receipt_ledger"])
+    allocations = list(payload.get("allocations") or [])
+    if not allocations and payload.get("invoice_number"):
+        allocations = [
+            {
+                "type": "against_reference",
+                "bill_name": payload.get("invoice_number"),
+                "amount": payload.get("amount"),
+            }
+        ]
+    allocation_xml = []
+    for row in allocations:
+        bill_type = _receipt_bill_type(row.get("type") or row.get("bill_type"))
+        bill_name = row.get("bill_name") or row.get("invoice_number") or row.get("voucher_number") or ""
+        row_amount = row.get("amount")
+        if row_amount in {None, ""}:
+            continue
+        # Party credit side on Receipt uses positive amount in BILLALLOCATIONS.
+        name_xml = f"<NAME>{escape(str(bill_name))}</NAME>" if bill_name else "<NAME></NAME>"
+        allocation_xml.append(
+            f"""
   <BILLALLOCATIONS.LIST>
-   <NAME>{bill}</NAME>
-   <BILLTYPE>Agst Ref</BILLTYPE>
-   <AMOUNT>-{amount}</AMOUNT>
+   {name_xml}
+   <BILLTYPE>{bill_type}</BILLTYPE>
+   <AMOUNT>{escape(str(row_amount))}</AMOUNT>
   </BILLALLOCATIONS.LIST>
-"""
+""".strip()
+        )
     return f"""
 <VOUCHER VCHTYPE="Receipt" ACTION="Alter" OBJVIEW="Accounting Voucher View">
  <DATE>{date}</DATE>
@@ -425,7 +539,7 @@ def receipt_voucher_xml(payload: dict, mapping: dict) -> str:
   <LEDGERNAME>{party}</LEDGERNAME>
   <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
   <AMOUNT>{amount}</AMOUNT>
-  {allocation}
+  {chr(10).join(allocation_xml)}
  </LEDGERENTRIES.LIST>
  <LEDGERENTRIES.LIST>
   <LEDGERNAME>{bank}</LEDGERNAME>
@@ -434,6 +548,44 @@ def receipt_voucher_xml(payload: dict, mapping: dict) -> str:
  </LEDGERENTRIES.LIST>
 </VOUCHER>
 """.strip()
+
+
+def classify_ledger_role(name: str | None) -> str:
+    text = (name or "").strip()
+    if not text:
+        return "other"
+    if _ROUND_OFF_RE.search(text):
+        return "round_off"
+    if _TAX_LEDGER_RE.search(text):
+        return "tax"
+    if _BANK_CASH_RE.search(text):
+        return "bank_cash"
+    return "other"
+
+
+def resolve_payment_receipt_party(
+    ledger_entries: list[dict[str, Any]],
+    declared_party: str | None,
+    base_type: str | None,
+) -> tuple[str | None, Any]:
+    """
+    Payment/Receipt: Account = bank/cash, Particulars = party/expense/tax.
+    Prefer the single non-tax, non-round-off Particulars ledger when Account is bank/cash.
+    """
+    base = (base_type or "").strip().lower()
+    if base not in {"payment", "receipt"}:
+        return declared_party, None
+    bankish = [entry for entry in ledger_entries if classify_ledger_role(entry.get("ledger_name")) == "bank_cash"]
+    particulars = [
+        entry
+        for entry in ledger_entries
+        if classify_ledger_role(entry.get("ledger_name")) == "other"
+    ]
+    if bankish and len(particulars) == 1:
+        return particulars[0].get("ledger_name"), None
+    if declared_party and classify_ledger_role(declared_party) == "bank_cash" and len(particulars) == 1:
+        return particulars[0].get("ledger_name"), None
+    return declared_party, None
 
 
 def parse_objects(
@@ -788,24 +940,31 @@ def _voucher_fields(
                 "bill_allocations": allocations,
             }
         )
-        party_name = _direct_text(node, "PARTYLEDGERNAME")
-        if party_name and ledger_name == party_name and amount is not None:
+        declared = _direct_text(node, "PARTYLEDGERNAME")
+        if declared and ledger_name == declared and amount is not None:
             party_amount = amount
+    declared_party = _direct_text(node, "PARTYLEDGERNAME")
+    party_name, party_ledger_id = resolve_payment_receipt_party(ledger_entries, declared_party, base)
+    if party_name and party_name != declared_party:
+        for entry in ledger_entries:
+            if entry.get("ledger_name") == party_name and entry.get("amount") is not None:
+                party_amount = entry["amount"]
+                break
     if party_amount is None:
         for entry in ledger_entries:
             if entry.get("amount") is not None:
                 party_amount = entry["amount"]
                 break
-    party_name = _direct_text(node, "PARTYLEDGERNAME")
     return {
         "voucher_number": _direct_text(node, "VOUCHERNUMBER"),
         "voucher_type": voucher_type,
         "voucher_type_base": base,
+        "base_type": base,
         "date": iso_date(_direct_text(node, "DATE")),
-        "party_ledger_id": None,  # Tally voucher XML exposes party by name; Pluschwood joins on ledger masters.
+        "party_ledger_id": party_ledger_id,  # Tally voucher XML exposes party by name; Pluschwood joins on ledger masters.
         "party_name": party_name,
         "amount": party_amount,
-        "currency": _direct_text(node, "CURRENCYNAME"),
+        "currency": _direct_text(node, "CURRENCYNAME") or "INR",
         "reference": _direct_text(node, "REFERENCE"),
         "narration": _direct_text(node, "NARRATION"),
         "irn": _direct_text(node, "IRN"),
