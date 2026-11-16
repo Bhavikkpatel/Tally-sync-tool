@@ -342,6 +342,44 @@ class SyncApp:
                 targets = [(item, client) for item, client in targets if item.id in forced]
             self._import_companies(targets, forced)
 
+    def export_parties(self) -> None:
+        """Re-export Tally ledgers and push OMS customer/vendor party batches."""
+        try:
+            if not self.paired():
+                self.last_message = "Sign in once before exporting customers & vendors"
+                self._progress(self.last_message)
+                return
+            health = self.tally.health()
+            if not health.get("ok"):
+                self.last_message = f"Tally offline: {health.get('error') or 'unreachable'}"
+                self._progress(self.last_message)
+                return
+            companies = [
+                company
+                for company in health.get("companies") or []
+                if company.get("guid") and company.get("name")
+            ]
+            with self._import_lock:
+                targets = list(self._company_targets())
+                forced = {destination.id for destination, _client in targets}
+                # Replay Group + Ledger so party roles resolve, then parties phase is sent.
+                for destination, _client in targets:
+                    for company in companies:
+                        guid = str(company.get("guid") or "")
+                        destination_store.set_cursor(self.store, destination.id, "group", 0, company_guid=guid)
+                        destination_store.set_cursor(self.store, destination.id, "ledger", 0, company_guid=guid)
+                        destination_store.set_import_done(
+                            self.store, destination.id, False, company_guid=guid
+                        )
+                self._progress("Exporting ledger masters and OMS customers/vendors")
+                self._import_companies(targets, forced, incremental=False, companies=companies)
+            self.last_message = "Customers & vendors export finished — check Live log"
+            self._progress(self.last_message)
+        except Exception as exc:
+            self.last_message = f"Customers & vendors export failed: {exc}"
+            self._progress(self.last_message)
+            traceback.print_exc()
+
     def _import_companies(self, targets, forced, *, incremental=False, companies=None):
         if not targets:
             return
@@ -431,10 +469,14 @@ class SyncApp:
                 return "No companies open in Tally"
             due: list[tuple[Destination, AutoSyncClient]] = []
             forced: set[str] = set()
-            for destination, client in self._company_targets():
+            targets = self._company_targets()
+            for destination, client in targets:
                 remote: dict = {}
                 try:
                     remote = client.status().get("installation") or {}
+                    if remote.get("mapping"):
+                        self.store.set_meta("ledger_mapping", remote["mapping"])
+                        self.store.set_meta(f"ledger_mapping_{destination.id}", remote["mapping"])
                 except Exception as exc:
                     if not force:
                         self._progress(f"{destination.label}: status failed ({exc})")
@@ -451,12 +493,43 @@ class SyncApp:
                     forced.add(destination.id)
                 if force or destination.id in forced or time.time() - last >= hours * 3600:
                     due.append((destination, client))
-            if not due:
-                return f"Up to date ({len(companies)} companies open)"
-            self._import_companies(due, forced, incremental=not force, companies=companies)
+            # Heartbeat → inbound → outbound → acknowledge (per destination).
+            for destination, client in targets:
+                try:
+                    client.heartbeat(
+                        "online",
+                        bool(self.store.get_meta(f"import_failed_{destination.id}")),
+                    )
+                except Exception as exc:
+                    self._progress(f"{destination.label}: heartbeat failed ({exc})")
+            if due:
+                self._import_companies(due, forced, incremental=not force, companies=companies)
+            outbound_bits: list[str] = []
+            for destination, client in targets:
+                try:
+                    summary = OutboundRunner(self.store, self.tally, client, self._progress).run()
+                    if summary.get("pushed") or summary.get("failed") or summary.get("skipped"):
+                        sync_log.log_event(
+                            f"{destination.label} · outbound",
+                            data_dir=self.config.data_dir,
+                            counts=summary if isinstance(summary, dict) else {},
+                        )
+                        outbound_bits.append(f"{destination.label} outbound={summary}")
+                except Exception as exc:
+                    sync_log.log_event(
+                        f"{destination.label} · outbound failed: {exc}",
+                        data_dir=self.config.data_dir,
+                    )
+                    outbound_bits.append(f"{destination.label} outbound failed ({exc})")
             for company in companies:
                 self._mark_synced("sync", company)
-            return f"Synced {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}"
+            if not due and not outbound_bits:
+                return f"Up to date ({len(companies)} companies open)"
+            parts = []
+            if due:
+                parts.append(f"Synced {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}")
+            parts.extend(outbound_bits)
+            return "; ".join(parts)
 
     def scheduled_tick(self, force_due=False) -> None:
         if PRODUCT_ID != "pluschwood":
@@ -720,6 +793,7 @@ class SyncApp:
             on_sign_in=self.sign_in_connect,
             on_pair=self.pair,
             on_import=lambda: self.run_import(force=True),
+            on_export_parties=self.export_parties,
             on_sync_now=self.sync_now,
             on_mapping=self.configure_mapping,
             on_open_log=open_sync_log,

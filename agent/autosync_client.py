@@ -9,6 +9,14 @@ class AutoSyncError(RuntimeError):
     pass
 
 
+class SyncPaused(AutoSyncError):
+    """A direction was turned off on the console. Not a crash."""
+
+    def __init__(self, direction: str, detail: str):
+        self.direction = direction
+        super().__init__(detail)
+
+
 class AutoSyncClient:
     def __init__(self, base_url: str, token: str | None = None, timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
@@ -109,13 +117,27 @@ class AutoSyncClient:
         return response.json()
 
     def import_batch(self, payload: dict) -> dict:
-        return self.request("POST", "/api/integrations/tally/import", json=payload)
+        return self._direction_request("inbound", "POST", "/api/integrations/tally/import", json=payload)
 
-    def outbound_feed(self) -> dict:
-        return self.request("GET", "/api/integrations/tally/outbound")
+    def outbound_feed(self, *, limit: int = 50) -> dict:
+        return self.request("GET", f"/api/integrations/tally/outbound?limit={int(limit)}")
 
     def acknowledge(self, items: list[dict]) -> dict:
-        return self.request("POST", "/api/integrations/tally/acknowledge", json={"items": items})
+        return self._direction_request(
+            "outbound",
+            "POST",
+            "/api/integrations/tally/acknowledge",
+            json={"items": items},
+        )
+
+    def _direction_request(self, direction: str, method: str, path: str, **kwargs) -> Any:
+        try:
+            return self.request(method, path, **kwargs)
+        except AutoSyncError as exc:
+            text = str(exc)
+            if text.startswith("409:") and "disabled" in text.lower():
+                raise SyncPaused(direction, text) from exc
+            raise
 
     def heartbeat(self, state: str, import_failed: bool = False) -> None:
         self.request("POST", "/api/integrations/tally/heartbeat", json={"state": state, "import_failed": import_failed}, timeout=3)

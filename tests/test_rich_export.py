@@ -29,16 +29,39 @@ class RichExportTests(unittest.TestCase):
         rich = tally_xml.parse_objects(xml, "LEDGER", rich=True, include_banking=True)
         customer = next(item for item in rich if item["name"] == "Acme Motors")
         self.assertEqual(customer["party_role"], "customer")
+        self.assertEqual(customer["oms_entity"], "customer")
         self.assertEqual(customer["gstin"], "29ABCDE1234F1Z5")
         self.assertEqual(len(customer["addresses"]), 1)
         self.assertEqual(customer["addresses"][0]["lines"][0], "Peenya Industrial Area")
         self.assertEqual(customer["gst_registrations"][0]["registration_type"], "Regular")
         self.assertEqual(customer["banking"]["ifsc"], "HDFC0001234")
+        vendor = next(item for item in rich if item["name"] == "Board Mills")
+        self.assertEqual(vendor["party_role"], "vendor")
+        self.assertEqual(vendor["oms_entity"], "vendor")
+        party = tally_xml.party_payload(vendor)
+        self.assertEqual(party["oms_entity"], "vendor")
+        self.assertNotIn("fields", party)
 
         lean = tally_xml.parse_objects(xml, "LEDGER", rich=False, include_banking=False)
         lean_customer = next(item for item in lean if item["name"] == "Acme Motors")
         self.assertNotIn("banking", lean_customer)
         self.assertNotIn("accountnumber", lean_customer["fields"])
+
+    def test_nested_group_resolves_customer_and_vendor(self):
+        groups = [
+            {"name": "Local Customers", "parent": "Sundry Debtors"},
+            {"name": "Trade Creditors", "parent": "Sundry Creditors"},
+        ]
+        parents = tally_xml.group_parent_map(groups)
+        ledgers = [
+            {"name": "Nested Buyer", "parent": "Local Customers"},
+            {"name": "Nested Seller", "parent": "Trade Creditors"},
+            {"name": "Cash", "parent": "Cash-in-Hand"},
+        ]
+        tally_xml.enrich_party_roles(ledgers, parents)
+        self.assertEqual(ledgers[0]["party_role"], "customer")
+        self.assertEqual(ledgers[1]["party_role"], "vendor")
+        self.assertIsNone(ledgers[2]["party_role"])
 
     def test_stock_item_hsn_and_rates(self):
         xml = (FIXTURES / "rich_stock_item.xml").read_text(encoding="utf-8")
@@ -86,6 +109,17 @@ class RichExportTests(unittest.TestCase):
         payment = next(item for item in vouchers if item["voucher_number"] == "PAY-3")
         self.assertEqual(payment["ledger_entries"][0]["is_deemed_positive"], "Yes")
         self.assertEqual(payment["bill_allocations"][0]["bill_name"], "PUR-10")
+        self.assertEqual(payment["party_name"], "Board Mills")
+        self.assertEqual(payment["base_type"], "Payment")
+
+        # Account=bank in PARTYLEDGERNAME but Particulars=supplier → party is supplier.
+        bank_party = next(item for item in vouchers if item["voucher_number"] == "PAY-BANK-PARTY")
+        self.assertEqual(bank_party["party_name"], "Board Mills")
+
+        # GST remittance (bank → CGST/SGST only) still exported; party stays bank/declared.
+        gst_pay = next(item for item in vouchers if item["voucher_number"] == "PAY-GST")
+        self.assertEqual(len(gst_pay["ledger_entries"]), 3)
+        self.assertIn(gst_pay["party_name"], {None, "HDFC Bank"})
 
     def test_pluschwood_reimport_does_not_reset_other_destination_cursor(self):
         with tempfile.TemporaryDirectory() as folder:

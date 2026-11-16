@@ -15,6 +15,7 @@ class AppController:
     on_sign_in: Callable[[], None]
     on_pair: Callable[[], None]
     on_import: Callable[[], None]
+    on_export_parties: Callable[[], None]
     on_sync_now: Callable[[], None]
     on_mapping: Callable[[], None]
     on_open_log: Callable[[], None]
@@ -301,6 +302,7 @@ HTML = """<!DOCTYPE html>
         <button type="button" data-action="pair">Enter pairing code…</button>
         <div class="sep"></div>
         <button type="button" data-action="import">Run full import</button>
+        <button type="button" data-action="export_parties">Export customers &amp; vendors…</button>
         <button type="button" data-action="sync">Sync now</button>
         <button type="button" data-action="mapping">Ledger mapping…</button>
         <div class="sep"></div>
@@ -552,11 +554,15 @@ class _Api:
         if name == "save":
             self.controller.save_settings(payload)
             return {"message": "Settings saved", "alert": "Settings saved"}
-        if name in {"sign_in", "pair", "import", "sync", "mapping", "log"}:
+        if name in {"sign_in", "pair", "import", "export_parties", "sync", "mapping", "log"}:
             actions = {
                 "sign_in": (self.controller.on_sign_in, "Sign-in started — complete approval in the browser"),
                 "pair": (self.controller.on_pair, "Pairing dialog opened"),
                 "import": (self.controller.on_import, "Import started"),
+                "export_parties": (
+                    self.controller.on_export_parties,
+                    "Exporting Tally ledgers as OMS customers/vendors",
+                ),
                 "sync": (self.controller.on_sync_now, "Sync started"),
                 "mapping": (self.controller.on_mapping, "Mapping dialog opened"),
                 "log": (self.controller.on_open_log, "Opened sync log"),

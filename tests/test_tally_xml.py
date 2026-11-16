@@ -82,6 +82,7 @@ class TallyXmlTests(unittest.TestCase):
                 "cgst_ledger": "CGST",
                 "sgst_ledger": "SGST",
                 "igst_ledger": "IGST",
+                "round_off_ledger": "Round Off",
             },
         )
         self.assertIn("<VOUCHERNUMBER>INV-100</VOUCHERNUMBER>", xml)
@@ -104,6 +105,32 @@ class TallyXmlTests(unittest.TestCase):
         self.assertIn("<BILLTYPE>Agst Ref</BILLTYPE>", xml)
         self.assertIn("<NAME>INV-100</NAME>", xml)
         self.assertIn("<LEDGERNAME>HDFC Bank</LEDGERNAME>", xml)
+
+    def test_receipt_builder_uses_allocations_array(self):
+        xml = tally_xml.receipt_voucher_xml(
+            {
+                "voucher_number": "RC-45",
+                "date": "2026-11-01",
+                "amount": "118.00",
+                "party_name": "Example Timber Buyer",
+                "allocations": [
+                    {"type": "against_reference", "bill_name": "PI-9", "amount": "100.00"},
+                    {"type": "on_account", "amount": "18.00"},
+                ],
+            },
+            {"receipt_ledger": "HDFC Bank Ltd"},
+        )
+        self.assertIn("<BILLTYPE>Agst Ref</BILLTYPE>", xml)
+        self.assertIn("<NAME>PI-9</NAME>", xml)
+        self.assertIn("<BILLTYPE>On Account</BILLTYPE>", xml)
+        self.assertIn("<LEDGERNAME>HDFC Bank Ltd</LEDGERNAME>", xml)
+
+    def test_sales_mapping_incomplete_raises(self):
+        with self.assertRaises(ValueError):
+            tally_xml.sales_voucher_xml(
+                {"number": "1", "date": "2026-01-01", "party_name": "A", "lines": [{"item_name": "X", "amount": "1"}]},
+                {"sales_voucher_type": "Sales"},
+            )
 
 
 if __name__ == "__main__":
